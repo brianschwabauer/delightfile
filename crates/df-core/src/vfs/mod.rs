@@ -36,7 +36,7 @@
 //!
 //! - [`wire`] — the pure codec: bytes ↔ messages, every length checked, no I/O.
 //! - [`crate::platform::pipe`] — timed waits on the child's pipes (`poll` on
-//!   Unix; nothing yet on Windows, where SFTP says it is not available).
+//!   Unix, a reader thread per pipe on Windows).
 //! - `conn` — one child process and one live session: handshake, pipelined
 //!   transfers, request-id matching, teardown.
 //! - `config` — `vfs.toml`, read from yazi's file first and delightfile's

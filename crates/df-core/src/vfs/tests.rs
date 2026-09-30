@@ -7,9 +7,10 @@
 //!    value; every bound (oversize, truncated, overrun, implausible counts) is
 //!    poked with a hostile packet. Pure functions, no processes.
 //! 2. **Fake-server tests** — [`Service::program`] pointed at `sh` replaying
-//!    crafted bytes, which is how "the server sent a reply with somebody
-//!    else's id" and "the server claimed a 4 GB packet" are exercised without
-//!    a server that would never send them.
+//!    crafted bytes (on Windows, the `sftp_replay` example,
+//!    `tests/bin/replay.rs`), which is how "the server sent a reply with
+//!    somebody else's id" and "the server claimed a 4 GB packet" are exercised
+//!    without a server that would never send them.
 //! 3. **The hermetic integration test** — OpenSSH's own `sftp-server` binary
 //!    *is* the other end of this protocol, and spawning it directly against a
 //!    temp directory exercises every byte of framing, pipelining, status
@@ -940,21 +941,21 @@ fn a_server_with_no_attrs_falls_back_to_the_longname() {
 
 // ── Fake servers: the failures a real one will not stage ────────────────────
 //
-// Unix only, each of them: the "server" is `/bin/sh`, and SFTP's pipe I/O has
-// no Windows body until W4.20, which gives these tests a small Rust replay
-// binary in place of the shell.
+// The "server" is `/bin/sh` on Unix and the `sftp_replay` example on Windows
+// (`tests/bin/replay.rs`), which `cargo test` builds beside this binary; a
+// build that skipped the examples (`--lib`) skips these on Windows, saying so.
 
 /// A service whose "server" is `sh` replaying `bytes`, then holding its pipes
 /// open until delightfile hangs up (the `read` waits for a newline that never
 /// comes; killing the child on drop ends it).
 #[cfg(unix)]
-fn replay_service(dir: &TempDir, bytes: &[u8]) -> Service {
+fn replay_service(dir: &TempDir, bytes: &[u8]) -> Option<Service> {
     assert!(
         !bytes.contains(&b'\n'),
         "replayed bytes must not satisfy the holding `read`"
     );
     let fixture = dir.file("replay.bin", bytes);
-    Service::direct(
+    Some(Service::direct(
         "fake",
         "/bin/sh",
         vec![
@@ -962,13 +963,82 @@ fn replay_service(dir: &TempDir, bytes: &[u8]) -> Service {
             "cat \"$0\"; read _hold".into(),
             fixture.display().to_string(),
         ],
-    )
+    ))
+}
+
+/// The `sftp_replay` example, where `cargo test` builds it: `examples/`
+/// beside the directory this test binary is in (`deps/`).
+#[cfg(windows)]
+fn replay_program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let program = exe
+        .parent()?
+        .parent()?
+        .join("examples")
+        .join("sftp_replay.exe");
+    if program.is_file() {
+        Some(program)
+    } else {
+        eprintln!(
+            "skipping: {} was not built (cargo test builds it; --lib does not)",
+            program.display()
+        );
+        None
+    }
+}
+
+/// A service whose "server" writes `bytes` and then holds its pipes open until
+/// delightfile hangs up (stdin ends when the transport drops).
+#[cfg(windows)]
+fn replay_service(dir: &TempDir, bytes: &[u8]) -> Option<Service> {
+    let fixture = dir.file("replay.bin", bytes);
+    Some(Service::direct(
+        "fake",
+        replay_program()?,
+        vec!["replay".into(), fixture.display().to_string()],
+    ))
+}
+
+/// A service whose "server" says `words` on stderr and exits 255, as `ssh`
+/// does when it cannot log in.
+#[cfg(unix)]
+fn failing_service(words: &str) -> Option<Service> {
+    Some(Service::direct(
+        "fake",
+        "/bin/sh",
+        vec!["-c".into(), format!("echo '{words}' >&2; exit 255")],
+    ))
+}
+
+#[cfg(windows)]
+fn failing_service(words: &str) -> Option<Service> {
+    Some(Service::direct(
+        "fake",
+        replay_program()?,
+        vec!["fail".into(), "255".into(), words.into()],
+    ))
+}
+
+/// A service whose "server" exits at once without a word.
+#[cfg(unix)]
+fn silent_service() -> Option<Service> {
+    // Looked up on `PATH`, where every Unix keeps one: macOS has no
+    // `/bin/true`, only `/usr/bin/true`.
+    Some(Service::direct("fake", "true", Vec::new()))
+}
+
+#[cfg(windows)]
+fn silent_service() -> Option<Service> {
+    Some(Service::direct(
+        "fake",
+        replay_program()?,
+        vec!["quiet".into()],
+    ))
 }
 
 /// A valid VERSION 3 reply, followed by a REALPATH `NAME` answer for the
 /// connect-time home resolution (request id 1), so a fake server can get a
 /// [`Connection`] all the way up before misbehaving.
-#[cfg(unix)]
 fn handshake_bytes() -> Vec<u8> {
     let mut bytes = Reply::Version {
         version: 3,
@@ -1001,7 +1071,6 @@ fn connect_err(service: Service, why: &str) -> VfsError {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_server_speaking_the_wrong_version_is_refused() {
     let dir = TempDir::new("vfs-badver");
@@ -1011,7 +1080,10 @@ fn a_server_speaking_the_wrong_version_is_refused() {
     }
     .encode(0)
     .unwrap();
-    let error = connect_err(replay_service(&dir, &bytes), "must refuse");
+    let Some(service) = replay_service(&dir, &bytes) else {
+        return;
+    };
+    let error = connect_err(service, "must refuse");
     assert!(
         matches!(
             error,
@@ -1024,7 +1096,6 @@ fn a_server_speaking_the_wrong_version_is_refused() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_reply_with_somebody_elses_id_hangs_up_the_connection() {
     let dir = TempDir::new("vfs-badid");
@@ -1038,7 +1109,10 @@ fn a_reply_with_somebody_elses_id_hangs_up_the_connection() {
         .encode(77)
         .unwrap(),
     );
-    let mut conn = connect_fake(replay_service(&dir, &bytes)).expect("handshake succeeds");
+    let Some(service) = replay_service(&dir, &bytes) else {
+        return;
+    };
+    let mut conn = connect_fake(service).expect("handshake succeeds");
     let error = conn
         .stat(&VfsPath::new("fake", "x"), true)
         .expect_err("the mismatched id must be a protocol error");
@@ -1055,13 +1129,15 @@ fn a_reply_with_somebody_elses_id_hangs_up_the_connection() {
     assert!(error.is_connection_fatal(), "pipelining's one failure mode");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_four_gigabyte_length_claim_costs_a_refusal_not_an_allocation() {
     let dir = TempDir::new("vfs-huge");
     let mut bytes = handshake_bytes();
     bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xF0]); // "4 GB follows"
-    let mut conn = connect_fake(replay_service(&dir, &bytes)).expect("handshake succeeds");
+    let Some(service) = replay_service(&dir, &bytes) else {
+        return;
+    };
+    let mut conn = connect_fake(service).expect("handshake succeeds");
     let error = conn
         .stat(&VfsPath::new("fake", "x"), true)
         .expect_err("must refuse");
@@ -1077,20 +1153,12 @@ fn a_four_gigabyte_length_claim_costs_a_refusal_not_an_allocation() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_server_that_dies_before_version_reports_ssh_own_words() {
-    let error = connect_err(
-        Service::direct(
-            "fake",
-            "/bin/sh",
-            vec![
-                "-c".into(),
-                "echo 'brian@host: Permission denied (publickey).' >&2; exit 255".into(),
-            ],
-        ),
-        "must fail",
-    );
+    let Some(service) = failing_service("brian@host: Permission denied (publickey).") else {
+        return;
+    };
+    let error = connect_err(service, "must fail");
     match &error {
         VfsError::Auth { detail, .. } => {
             assert!(detail.contains("Permission denied"), "{detail}")
@@ -1099,15 +1167,12 @@ fn a_server_that_dies_before_version_reports_ssh_own_words() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_server_that_closes_silently_is_a_disconnect() {
-    let error = connect_err(
-        // Looked up on `PATH`, where every Unix keeps one: macOS has no
-        // `/bin/true`, only `/usr/bin/true`.
-        Service::direct("fake", "true", Vec::new()),
-        "must fail",
-    );
+    let Some(service) = silent_service() else {
+        return;
+    };
+    let error = connect_err(service, "must fail");
     assert!(matches!(error, VfsError::Disconnected { .. }), "{error}");
 }
 
@@ -1663,6 +1728,70 @@ fn a_dropped_connection_reconnects_on_the_next_request() {
     // ...and the one after that succeeds on a fresh child.
     let attrs = vfs
         .stat(&root.join("still-here.txt"), true, &ctx)
+        .expect("the reconnect should be invisible beyond one error");
+    assert_eq!(attrs.size, Some(3));
+}
+
+/// The reconnect path on Windows, where there is no `sftp-server` to kill: a
+/// replay server that answers the handshake and one `STAT`, named by the pid
+/// file it writes, is ended behind the vfs's back; one operation fails with a
+/// connection error, and the next succeeds on a fresh one.
+#[cfg(windows)]
+#[test]
+fn a_dropped_connection_reconnects_on_the_next_request() {
+    let dir = TempDir::new("vfs-reconnect");
+    let mut bytes = handshake_bytes();
+    // A connection's first request after the handshake carries id 2.
+    bytes.extend(
+        Reply::Attrs(Attrs {
+            size: Some(3),
+            ..Attrs::empty()
+        })
+        .encode(2)
+        .unwrap(),
+    );
+    let fixture = dir.file("replay.bin", &bytes);
+    let pid_file = dir.path.join("server.pid");
+    let Some(program) = replay_program() else {
+        return;
+    };
+    let service = Service::direct(
+        "test",
+        program,
+        vec![
+            "replay".into(),
+            fixture.display().to_string(),
+            pid_file.display().to_string(),
+        ],
+    );
+    let mut config = VfsConfig::default();
+    config.insert(service);
+    let vfs = Vfs::with_config(config, Vec::new(), no_notifier());
+    let ctx = TaskCtx::detached();
+    let path = VfsPath::new("test", "still-here.txt");
+
+    assert_eq!(vfs.stat(&path, true, &ctx).unwrap().size, Some(3));
+
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let killed = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", pid.trim()])
+        .output()
+        .unwrap();
+    assert!(killed.status.success(), "{killed:?}");
+
+    let deadline = Instant::now() + T;
+    loop {
+        match vfs.stat(&path, true, &ctx) {
+            Err(e) if e.is_connection_fatal() => break,
+            Ok(_) => {}
+            Err(e) => panic!("expected a connection-fatal error, got {e}"),
+        }
+        assert!(Instant::now() < deadline, "the death was never noticed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let attrs = vfs
+        .stat(&path, true, &ctx)
         .expect("the reconnect should be invisible beyond one error");
     assert_eq!(attrs.size, Some(3));
 }

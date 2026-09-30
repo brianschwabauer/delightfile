@@ -16,10 +16,11 @@
 //!
 //! Every read and every write goes through [`crate::platform::pipe`] with a
 //! deadline ([`super::CONNECT_TIMEOUT`] for the handshake, [`super::OP_TIMEOUT`]
-//! for everything after). stderr is polled alongside stdout on every wait, so
-//! `ssh`'s own diagnosis — "Permission denied (publickey)", "Host key
-//! verification failed" — is already in hand at the moment stdout hits EOF, and
-//! the user is told *why* the connection failed rather than that it did.
+//! for everything after) — `poll` on Unix, a thread per pipe on Windows. stderr
+//! is read alongside stdout on every wait, so `ssh`'s own diagnosis —
+//! "Permission denied (publickey)", "Host key verification failed" — is already
+//! in hand at the moment stdout hits EOF, and the user is told *why* the
+//! connection failed rather than that it did.
 //!
 //! ## Pipelining
 //!
@@ -50,9 +51,9 @@
 //!   discarded, and no new request is issued past the known end.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -136,35 +137,15 @@ const STDERR_GRACE: Duration = Duration::from_millis(200);
 struct Transport {
     service: String,
     child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    /// The three pipes, waited on with deadlines ([`pipe::Pipes`]).
+    pipes: pipe::Pipes,
     /// Bytes read off stdout that are not yet a whole packet.
     inbuf: Vec<u8>,
-    scratch: Vec<u8>,
-    errbuf: Vec<u8>,
-    /// The child's stderr reached EOF. Once it has, it is readable forever, so
-    /// it stops being polled — otherwise every wait would return instantly and
-    /// the deadline would be enforced by a busy loop.
-    stderr_done: bool,
 }
 
 impl Transport {
     fn spawn(service: &Service) -> Result<Transport, VfsError> {
         let mut command = service.command();
-        // Nothing here can wait on a pipe with a deadline (Windows, until
-        // W4.20), so nothing is started: the connection fails with the
-        // platform's refusal rather than with a session that could hang.
-        if !pipe::AVAILABLE {
-            return Err(VfsError::Spawn {
-                service: service.name.clone(),
-                program: command.get_program().to_string_lossy().into_owned(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    crate::DfError::Unsupported("SFTP"),
-                ),
-            });
-        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -187,34 +168,33 @@ impl Transport {
         let stdout = child.stdout.take().ok_or_else(missing)?;
         let stderr = child.stderr.take().ok_or_else(missing)?;
 
-        // Stdin and stderr, not stdout: see `pipe::set_nonblocking` for why
-        // stdout stays blocking. Stderr must not block because
-        // `drain_stderr` reads it *without* a preceding poll saying
-        // "readable". A failure here is not fatal — a blocking pipe is still
-        // correct, just capable of blocking past its deadline — so it is
-        // logged rather than raised.
-        for (name, fd) in [("stdin", pipe::fd(&stdin)), ("stderr", pipe::fd(&stderr))] {
-            if let Err(e) = pipe::set_nonblocking(fd) {
-                log::warn!("vfs {}: {name} stayed blocking: {e}", service.name);
-            }
-        }
+        let pipes =
+            match pipe::Pipes::open(stdin, stdout, stderr, SCRATCH, MAX_STDERR, &service.name) {
+                Ok(pipes) => pipes,
+                Err(source) => {
+                    let _ignored = child.kill();
+                    let _ignored = child.wait();
+                    return Err(VfsError::Spawn {
+                        service: service.name.clone(),
+                        program: command.get_program().to_string_lossy().into_owned(),
+                        source,
+                    });
+                }
+            };
 
         Ok(Transport {
             service: service.name.clone(),
             child,
-            stdin,
-            stdout,
-            stderr,
+            pipes,
             inbuf: Vec::with_capacity(SCRATCH),
-            scratch: vec![0; SCRATCH],
-            errbuf: Vec::new(),
-            stderr_done: false,
         })
     }
 
     /// Whatever `ssh` has complained about, trimmed, or an empty string.
     fn stderr_text(&self) -> String {
-        String::from_utf8_lossy(&self.errbuf).trim().to_string()
+        String::from_utf8_lossy(self.pipes.stderr())
+            .trim()
+            .to_string()
     }
 
     fn disconnected(&self) -> VfsError {
@@ -244,39 +224,11 @@ impl Transport {
         }
     }
 
-    /// Read whatever `ssh` has written to stderr right now, up to the cap.
-    fn slurp_stderr(&mut self) {
-        let mut buffer = [0u8; 4096];
-        match self.stderr.read(&mut buffer) {
-            Ok(0) => self.stderr_done = true,
-            Ok(n) => {
-                let room = MAX_STDERR.saturating_sub(self.errbuf.len());
-                if room > 0 {
-                    self.errbuf.extend_from_slice(&buffer[..n.min(room)]);
-                }
-            }
-            // Nothing there after all, or a signal. Either way there is nothing
-            // to do but carry on; stderr is diagnostic, never load-bearing.
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => {}
-            Err(_) => self.stderr_done = true,
-        }
-    }
-
     /// Give stderr a moment to deliver `ssh`'s diagnosis after the connection
     /// has died, then stop caring. Called on the EOF and broken-pipe paths,
     /// where the cause of death is racing down the other pipe.
     fn drain_stderr(&mut self) {
-        let deadline = Instant::now() + STDERR_GRACE;
-        while !self.stderr_done {
-            let Some(left) = pipe::remaining(deadline) else {
-                return;
-            };
-            match pipe::poll_read2(pipe::fd(&self.stderr), -1, left) {
-                Ok((true, _)) => self.slurp_stderr(),
-                Ok(_) => return, // the grace period elapsed with nothing there
-                Err(_) => return,
-            }
-        }
+        self.pipes.drain_stderr(Instant::now() + STDERR_GRACE);
     }
 
     /// Read until `inbuf` holds at least `want` bytes, or the deadline passes.
@@ -285,34 +237,14 @@ impl Transport {
             let Some(left) = pipe::remaining(deadline) else {
                 return Err(self.timed_out(op, OP_TIMEOUT));
             };
-            // A negative fd is ignored by `poll`, which is how a finished
-            // stderr stops waking the loop.
-            let err_fd = if self.stderr_done {
-                -1
-            } else {
-                pipe::fd(&self.stderr)
-            };
-            let (out_ready, err_ready) =
-                pipe::poll_read2(pipe::fd(&self.stdout), err_fd, left).map_err(|e| self.io(e))?;
-            if err_ready {
-                self.slurp_stderr();
-            }
-            if !out_ready {
-                continue;
-            }
-            match self.stdout.read(&mut self.scratch) {
+            match self.pipes.read(&mut self.inbuf, left) {
+                Ok(pipe::Read::Data | pipe::Read::Nothing) => {}
                 // EOF on stdout: the child is gone. Drain what it said on the
                 // way out so the error names a cause.
-                Ok(0) => {
+                Ok(pipe::Read::Eof) => {
                     self.drain_stderr();
                     return Err(self.disconnected());
                 }
-                Ok(n) => self.inbuf.extend_from_slice(&self.scratch[..n]),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) => {}
                 Err(e) => return Err(self.io(e)),
             }
         }
@@ -356,19 +288,12 @@ impl Transport {
             let Some(left) = pipe::remaining(deadline) else {
                 return Err(self.timed_out(op, OP_TIMEOUT));
             };
-            if !pipe::poll_write(pipe::fd(&self.stdin), left).map_err(|e| self.io(e))? {
-                continue;
-            }
-            match self.stdin.write(bytes) {
-                Ok(0) => return Err(self.disconnected()),
-                Ok(n) => bytes = &bytes[n..],
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) => {}
+            match self.pipes.write(bytes, left) {
+                Ok(pipe::Wrote::Bytes(0)) => return Err(self.disconnected()),
+                Ok(pipe::Wrote::Bytes(n)) => bytes = &bytes[n..],
+                Ok(pipe::Wrote::Nothing) => {}
                 // A broken pipe means the child exited; its stderr says why.
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                Ok(pipe::Wrote::Broken) => {
                     self.drain_stderr();
                     return Err(self.disconnected());
                 }

@@ -15,6 +15,14 @@ repository.workspace = true
 # `[dev-dependencies]` and gets the same fixture the ops tests use.
 test-support = []
 
+# A stand-in SFTP server the vfs tests run on Windows, where there is no
+# `/bin/sh` to replay a server's bytes with (`tests/bin/replay.rs`). An
+# example because `cargo test` builds examples before it runs the tests, and
+# a unit test finds it beside its own binary; nothing ships it.
+[[example]]
+name = "sftp_replay"
+path = "tests/bin/replay.rs"
+
 # Deliberately no winit/egui/wgpu (PLAN §1): everything in here has to be
 # unit-testable without a display, and the compile-time proof of that is the
 # dependency list staying this short.

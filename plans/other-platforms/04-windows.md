@@ -762,6 +762,34 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   child end; nothing on Windows spawns the daemon until W4.32.
 - (df-core) 2026-09-29 — W4.31: `platform/stub/process.rs` is compiled for
   macOS alone, as the trash and watch stubs are.
+- (df-core) 2026-09-29 — W4.20: stdin has a thread too, `df-sftp-in`, where
+  the task kept it synchronous with a watchdog check on the next call. A
+  synchronous write the child has stopped draining never returns, so no
+  check after it runs; with the thread, a write waits for its answer with
+  the time left and times out as a read does (connection-fatal, so the
+  transport kills the child, which breaks the pipe under the thread and
+  frees it). None of the three threads is joined: each ends at its pipe's
+  end or when nobody listens, and waiting could hang on a grandchild that
+  inherited a pipe.
+- (df-core) 2026-09-29 — W4.20: the seam is `platform::pipe::Pipes` —
+  `open`, `read`, `write`, `drain_stderr`, `stderr` — rather than the task's
+  `Reader` with `read_until`, because writes needed a home too. On Unix it
+  is the `poll` code `vfs::conn` had, moved behind it: the same calls in the
+  same order, the same errors for the same outcomes (`fill` and `write_all`
+  keep their loops and their deadline checks; the wait-and-call step inside
+  each is the platform's). `pipe::AVAILABLE` is gone, every target having
+  pipes now, and with it the refusal before `ssh` starts.
+- (df-core) 2026-09-29 — W4.20: the replay binary is the example
+  `sftp_replay` (`crates/df-core/tests/bin/replay.rs`), not a `[[bin]]`:
+  `cargo test` builds examples before it runs tests, and a unit test finds
+  one beside its own binary, where a `[[bin]]`'s path is given only to
+  integration tests. A `--lib` run has no examples, and the Windows tests
+  that need it skip, saying so. The six fake-server tests lost their
+  `cfg(unix)`; Unix keeps `/bin/sh` for them. The reconnect test needs
+  OpenSSH's `sftp-server`, which the runner's Windows has not, so it has a
+  Windows twin of the same name: a replay server that answers the
+  handshake and one `STAT`, ended by `taskkill` through the pid file it
+  writes.
 
 ## Open questions
 
