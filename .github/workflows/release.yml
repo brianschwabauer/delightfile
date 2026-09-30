@@ -1,9 +1,9 @@
 # The release workflow of plans/other-platforms/06-build-and-release.md §4
-# and §5 (B6.22–B6.24). A tag v<version>, where <version> is Cargo.toml's
+# and §5 (B6.22–B6.25). A tag v<version>, where <version> is Cargo.toml's
 # [workspace.package] version, builds the three release artifacts on their
 # own runners, checks each one the way a person would use it on a machine
 # that never built anything, and creates a draft pre-release holding them,
-# their .sha256 files and the Homebrew cask, with notes
+# their .sha256 files, the Homebrew cask and the scoop manifest, with notes
 # drafted from the commit subjects since the previous tag. Brian edits the
 # draft and publishes it; nothing here publishes.
 #
@@ -256,7 +256,8 @@ jobs:
           retention-days: 7
 
   # Everything the release holds, in one place: the three packages, a
-  # .sha256 beside each, the cask filled in (B6.24), and the notes (B6.23).
+  # .sha256 beside each, the cask and the scoop manifest filled in (B6.24,
+  # B6.25), and the notes (B6.23).
   assemble:
     needs: [version, linux, macos, windows]
     runs-on: ubuntu-latest
@@ -281,12 +282,13 @@ jobs:
             cat "$file.sha256"
           done
 
-      - name: The Homebrew cask
+      - name: The Homebrew cask and the scoop manifest
         env:
           VERSION: ${{ needs.version.outputs.version }}
           MINIMUM: ${{ needs.macos.outputs.minimum }}
         run: |
           dmg="dist/delightfile-$VERSION-aarch64-macos.dmg"
+          zip="dist/delightfile-$VERSION-x86_64-windows.zip"
           case ${MINIMUM%%.*} in
             11) macos=big_sur ;;
             12) macos=monterey ;;
@@ -298,11 +300,14 @@ jobs:
           esac
           sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$dmg.sha256")/g" -e "s/@MACOS@/$macos/g" \
             build/homebrew/delightfile.rb > dist/delightfile.rb
-          if grep -n '@[A-Z0-9_]*@' dist/delightfile.rb; then
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$zip.sha256")/g" \
+            build/scoop/delightfile.json > dist/delightfile.json
+          if grep -n '@[A-Z0-9_]*@' dist/delightfile.rb dist/delightfile.json; then
             echo "::error::a placeholder was left unfilled"
             exit 1
           fi
-          cat dist/delightfile.rb
+          python3 -m json.tool dist/delightfile.json > /dev/null
+          cat dist/delightfile.rb dist/delightfile.json
 
       # B6.23: the subjects since the previous v* tag, or since the start
       # when there is none, cut to fit GitHub's 125,000-character limit on a
@@ -443,7 +448,8 @@ jobs:
           bash build/macos/check-app.sh /Applications/delightfile.app
           brew uninstall --cask delightfile
 
-  # B6.19's done-when on a fresh runner that never had FFmpeg.
+  # B6.19's done-when on a fresh runner that never had FFmpeg, and B6.25's:
+  # scoop installs the manifest and the shim runs.
   verify-windows:
     needs: [version, assemble]
     runs-on: windows-latest
@@ -468,6 +474,35 @@ jobs:
           $want = ((Get-Content "$zip.sha256") -split '\s+')[0]
           if ($sha -ne $want) { throw "$zip has sha256 $sha; its .sha256 says $want" }
           build/windows/check-package.ps1 -Zip $zip
+
+      # Scoop from its installer at a fixed commit, then the manifest with
+      # its url pointed at a server on this runner, the release it names not
+      # existing yet.
+      - name: The scoop manifest (scoop install)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'install-scoop.ps1'
+          Invoke-WebRequest https://raw.githubusercontent.com/ScoopInstaller/Install/1e2f334083d609986d8c8bc9e31ae8e87c39fab4/install.ps1 -OutFile $installer
+          & $installer -RunAsAdmin
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop --version
+          $server = Start-Process python -ArgumentList @('-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', (Resolve-Path dist).Path) -PassThru -NoNewWindow
+          try {
+            Start-Sleep -Seconds 2
+            $manifest = Get-Content dist/delightfile.json -Raw | ConvertFrom-Json
+            $manifest.architecture.'64bit'.url = "http://127.0.0.1:8765/delightfile-$env:VERSION-x86_64-windows.zip"
+            $local = Join-Path $env:RUNNER_TEMP 'delightfile.json'
+            $manifest | ConvertTo-Json -Depth 10 | Set-Content $local
+            scoop install $local
+            if ($LASTEXITCODE -ne 0) { throw "scoop install failed" }
+            $said = "$(delightfile --version)".Trim()
+            Write-Output "delightfile --version through scoop's shim: $said"
+            if ($said -ne "delightfile $env:VERSION") { throw "the scoop shim's --version said '$said'" }
+            scoop uninstall delightfile
+          } finally {
+            Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
+          }
 
   # B6.22: a draft pre-release on the tag, with everything assemble made.
   # Only a tag push (or a dispatch on a tag with dry_run off) gets here.

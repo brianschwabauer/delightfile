@@ -1,0 +1,37 @@
+{
+    "##": [
+        "The scoop manifest for delightfile (plans/other-platforms/06-build-and-release.md B6.25).",
+        "The release workflow fills in the version and the zip's sha256 and attaches the result to the release as delightfile.json.",
+        "It belongs in brianschwabauer/scoop-bucket as bucket/delightfile.json; after that, checkver and autoupdate keep it current."
+    ],
+    "version": "@VERSION@",
+    "description": "Keyboard-first file manager",
+    "homepage": "https://github.com/brianschwabauer/delightfile",
+    "license": "GPL-3.0-or-later",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/brianschwabauer/delightfile/releases/download/v@VERSION@/delightfile-@VERSION@-x86_64-windows.zip",
+            "hash": "@SHA256@",
+            "extract_dir": "delightfile-@VERSION@-x86_64-windows"
+        }
+    },
+    "bin": "delightfile.exe",
+    "shortcuts": [
+        [
+            "delightfile.exe",
+            "delightfile"
+        ]
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/brianschwabauer/delightfile/releases/download/v$version/delightfile-$version-x86_64-windows.zip",
+                "extract_dir": "delightfile-$version-x86_64-windows"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}
