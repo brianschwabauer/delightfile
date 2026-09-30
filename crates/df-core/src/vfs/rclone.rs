@@ -187,6 +187,9 @@ pub(super) struct Daemon {
     /// [`Service::rclone_fs`], computed once.
     fs: String,
     child: Child,
+    /// What ends the daemon with delightfile where that is arranged after the
+    /// start (a job object on Windows); held for the daemon's whole life.
+    _tie: child::Tie,
     socket: PathBuf,
     /// The tail of rclone's stderr, filled by the reader thread.
     stderr: Arc<Mutex<VecDeque<String>>>,
@@ -262,6 +265,18 @@ impl Daemon {
         let mut child = command
             .spawn()
             .map_err(|source| spawn_failure(&service, &program, source))?;
+        let tie = match child::tie(&child) {
+            Ok(tie) => tie,
+            Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(VfsError::Spawn {
+                    service: service.name.clone(),
+                    program: "the job that ties rclone to delightfile".to_string(),
+                    source,
+                });
+            }
+        };
         log::info!(
             "vfs {}: rclone rcd (pid {}) on {} for {}",
             service.name,
@@ -291,6 +306,7 @@ impl Daemon {
             fs: service.rclone_fs(),
             service,
             child,
+            _tie: tie,
             socket,
             stderr,
             reader,

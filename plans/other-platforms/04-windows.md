@@ -750,6 +750,18 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   and at most 63 directories are watched, its limit less the wake event.
 - (df-core) 2026-09-29 — W4.4: `platform/stub/watch.rs` is compiled for macOS
   alone, as the trash stub is (W4.7).
+- (df-core) 2026-09-29 — W4.31: the seam gains `tie(&Child) -> io::Result<Tie>`
+  beside `tie_to_this_thread(&mut Command)`. Reason: a process goes into a
+  job only once it exists, and `std` has no stable way to start one inside a
+  job (the attribute list is unstable), so Windows' half comes after the
+  spawn and its handle needs an owner — the `Tie`, which the rclone
+  `Daemon` holds for its life. On Linux and macOS `tie` does nothing and the
+  `Tie` is empty; Linux's parent-death signal is unchanged. A delightfile
+  killed between the spawn and the assignment leaves that one child running.
+  The runner test ends a parent with `TerminateProcess` and sees its tied
+  child end; nothing on Windows spawns the daemon until W4.32.
+- (df-core) 2026-09-29 — W4.31: `platform/stub/process.rs` is compiled for
+  macOS alone, as the trash and watch stubs are.
 
 ## Open questions
 

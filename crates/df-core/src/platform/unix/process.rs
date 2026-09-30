@@ -69,6 +69,17 @@ pub fn quiet(command: &mut Command) -> &mut Command {
     command
 }
 
+/// What a started child's tie to this process is held by: nothing here, where
+/// `tie_to_this_thread` arranged it before the start (Linux) or nothing can
+/// yet (macOS, M2.29). Windows' is a job object.
+#[derive(Debug)]
+pub struct Tie;
+
+/// Nothing to do once the child has started: an empty [`Tie`].
+pub fn tie(_child: &Child) -> io::Result<Tie> {
+    Ok(Tie)
+}
+
 /// The number a finished child exited with, as a shell's `$?` says it.
 pub fn exit_code(status: &ExitStatus) -> i32 {
     // A signalled child has no code; 128 + signal is what every shell reports
