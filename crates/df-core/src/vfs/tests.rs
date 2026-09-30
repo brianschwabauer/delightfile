@@ -996,14 +996,20 @@ fn replay_program() -> Option<PathBuf> {
         .join("examples")
         .join("sftp_replay.exe");
     if program.is_file() {
-        Some(program)
-    } else {
-        eprintln!(
-            "skipping: {} was not built (cargo test builds it; --lib does not)",
-            program.display()
-        );
-        None
+        return Some(program);
     }
+    // A runner's `cargo test` always builds it, so there a missing one is a
+    // broken build, not a reason to skip.
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{} was not built",
+        program.display()
+    );
+    eprintln!(
+        "skipping: {} was not built (cargo test builds it; --lib does not)",
+        program.display()
+    );
+    None
 }
 
 /// A service whose "server" writes `bytes` and then holds its pipes open until
