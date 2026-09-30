@@ -338,9 +338,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
 
+      # The program is a windows-subsystem executable that joins its
+      # parent's console (W4.1 in 04-windows.md), so what it prints has to
+      # reach the pipe this step reads: checked, not trusted.
       - name: Smoke test (the binary loads and runs)
         if: ${{ !cancelled() }}
-        run: target/debug/delightfile --version
+        run: |
+          out=$(target/debug/delightfile --version)
+          echo "$out"
+          [[ "$out" == delightfile\ * ]]
 
       # The program and the FFmpeg DLLs it loads, for trying by hand on a
       # Windows machine: CI proves it starts, not that it draws.

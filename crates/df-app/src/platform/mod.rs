@@ -26,6 +26,7 @@
 //! | Item | Signature | Linux | macOS, Windows | Task |
 //! |---|---|---|---|---|
 //! | `HAS_PORTAL` | `const bool`: whether `--portal` exists | `true` | `false` | S1.31 |
+//! | `process::attach_parent_console` | `fn()`, first thing in `main` | nothing (the shared `unix` body) | macOS nothing; Windows: `AttachConsole(ATTACH_PARENT_PROCESS)`, and standard output and error that point nowhere reopened on `CONOUT$` | W4.1 |
 //! | `portal::run` | `fn() -> i32`, the process's exit status | the file-chooser portal and `org.freedesktop.FileManager1` on the session bus | never reached (`--portal` is not accepted); says so and returns 2 | S1.31 |
 //! | `cli::{REVEAL_USAGE, REQUEST_USAGE, EXTRA_USAGE}` | `&str`, the `--help` entries that differ | the `--reveal` and `--chooser-request` entries naming the portal, and `--portal`'s | the same two without it, and `""` | S1.31 |
 //! | `clipboard::{copy, reap, offered_types, paste}` | `copy(Option<&str>, &[u8]) -> Result<Option<Child>, clipboard::ClipError>` (`Some` is a process the window owns until `reap(&mut Child)`, `None` a copy already made), `offered_types() -> Result<Vec<String>, ClipError>`, `paste(&str) -> Result<Vec<u8>, ClipError>`: the clipboard without a data device | `wl-copy --foreground`, `wl-paste` | macOS: `NSPasteboard`, synchronous, so `copy` is `Ok(None)` (M2.10); Windows: every call `ClipError::Missing("clipboard")`; `reap` stops and collects | S1.23 |

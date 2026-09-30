@@ -1,11 +1,20 @@
-//! delightfile — a native, GPU-rendered, keyboard-first file manager for
-//! Wayland (PLAN §1).
+//! delightfile — a native, GPU-rendered, keyboard-first file manager (PLAN
+//! §1), for Wayland first and for macOS and Windows behind the platform seam
+//! (`plans/other-platforms/`).
 //!
 //! Phase 1 is the browser: three miller columns, a cursor that obeys
 //! `scrolloff`, the yazi keymap driving it, and a directory model that keeps up
 //! with the filesystem underneath it. Everything hangs off the two decisions
 //! made in Phase 0 — the `Wake` user event as the single cross-thread wakeup,
 //! and workers being startable before the window exists.
+//!
+//! On Windows the executable is a windows-subsystem program, so no console
+//! opens beside the window; `main` joins the console of a terminal that
+//! started it (`platform::process::attach_parent_console`), so `--help` and
+//! `--version` still print there. This attribute is the one `cfg` outside
+//! `platform/` the ground rules allow; the unit-test build keeps the console
+//! subsystem, being a test runner and not the program.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod app;
 /// Following the desktop between light and dark (`[flavor] mode = "auto"`).
@@ -84,6 +93,9 @@ use winit::event_loop::EventLoop;
 pub struct Wake;
 
 fn main() {
+    // Before anything is written: on Windows the streams point nowhere until
+    // the terminal that started us, if one did, is joined.
+    platform::process::attach_parent_console();
     // Milliseconds, not seconds. PLAN §6's cold-start audit is a measurement of
     // the first few hundred milliseconds of the process — "window mapped" and
     // "first listing" land in the same second as the launch, so a

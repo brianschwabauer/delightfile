@@ -21,6 +21,7 @@ pub mod keys;
 pub mod mounts;
 pub mod open;
 pub mod pdfium;
+pub use crate::platform::unix::process;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").
 pub mod portal;
