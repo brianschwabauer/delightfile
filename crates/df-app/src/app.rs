@@ -23304,6 +23304,15 @@ mod tests {
         // card has not scrolled, so there is no bar, however long the
         // pointer stays on the card.
         let on_card = egui::pos2(g.card.right() - 30.0, g.card.center().y);
+        // …and a place on the card that is over the list, for the end. How
+        // far the card reaches over the list is how wide its keys are
+        // written, and a Mac's `⌘n` is narrower than `Ctrl+n` (M2.21).
+        let list = layout_of(&app).list;
+        let over_list = egui::pos2(
+            (list.left().max(g.card.left()) + g.card.right()) / 2.0,
+            g.card.center().y,
+        );
+        assert!(g.card.contains(over_list) && list.contains(over_list));
         assert!(matches!(g.hit(on_card), Some(Control::MenuItem(_))));
         frame(&mut app, vec![egui::Event::PointerMoved(on_card)]);
         frame(&mut app, Vec::new());
@@ -23373,7 +23382,7 @@ mod tests {
         // the card was covering the list, not some pane that could not move.
         key(&mut app, Key::Escape);
         assert_eq!(live_menu(&app), None);
-        frame(&mut app, vec![egui::Event::PointerMoved(on_card), roll]);
+        frame(&mut app, vec![egui::Event::PointerMoved(over_list), roll]);
         assert!(app.tab().cwd.first() > 0, "the list did not scroll");
     }
 
@@ -24997,9 +25006,15 @@ mod tests {
             row.description,
             "Choose — what the dialog's Select / Choose folder / Save button does"
         );
+        // The `ctrl` role as the platform writes it: `⌘` on a Mac (M2.21).
+        let ctrl = if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "ctrl"
+        };
         let keys = row.keys.to_lowercase();
         assert!(
-            keys.contains("ctrl") && keys.contains("enter"),
+            keys.contains(ctrl) && keys.contains("enter"),
             "{}",
             row.keys
         );
@@ -26448,7 +26463,18 @@ mod tests {
         let mut app = Fixture::with_folders("hint-commands", &["a.txt", "b.txt"], &["sub"]);
         let check = |app: &App, stack: &ContextStack, hints: &[chrome::Hint], what: &str| {
             for hint in hints {
-                let chord = df_core::keymap::parse_chord(&hint.keys.to_lowercase());
+                // A Mac writes a chord with its key caps' marks (`⌥Enter`),
+                // which is no spelling `parse_chord` reads: such a hint is
+                // found by the label the keymap writes its chord with (M2.21).
+                let chord = df_core::keymap::parse_chord(&hint.keys.to_lowercase()).or_else(|e| {
+                    app.keymap
+                        .bindings()
+                        .iter()
+                        .filter(|binding| binding.seq.len() == 1)
+                        .map(|binding| binding.seq[0])
+                        .find(|chord| chord.label() == hint.keys)
+                        .ok_or(e)
+                });
                 let dispatched = chord.as_ref().ok().map(|chord| {
                     app.keymap.dispatch(
                         &mut KeymapState::new(),
