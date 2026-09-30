@@ -82,6 +82,9 @@ pub fn is_transient(e: &io::Error) -> bool {
 /// `STATUS_DELETE_PENDING`, from `ntstatus.h`: the file has been marked for
 /// deletion by a handle that is still open, and will be gone when it closes.
 const STATUS_DELETE_PENDING: i32 = 0xC000_0056_u32 as i32;
+/// `STATUS_FILE_DELETED`: a call on a handle whose file has since been
+/// deleted — a listing still open on a folder somebody removed.
+const STATUS_FILE_DELETED: i32 = 0xC000_0123_u32 as i32;
 /// `STATUS_OBJECT_NAME_NOT_FOUND`, `STATUS_OBJECT_PATH_NOT_FOUND`,
 /// `STATUS_NO_SUCH_FILE`: the name is not there.
 const STATUS_NOT_THERE: [i32; 3] = [
@@ -97,8 +100,10 @@ extern "system" {
 
 /// Whether `e`, an `ERROR_ACCESS_DENIED`, is a name another deleter has
 /// already marked for deletion — `STATUS_DELETE_PENDING` underneath, which
-/// Win32 reports as access denied — and so is as good as gone. Also when the
-/// last status says the name is not there at all: `std`'s `symlink_metadata`
+/// Win32 reports as access denied — and so is as good as gone. So is a call on
+/// a folder deleted since it was opened (`STATUS_FILE_DELETED`: a listing still
+/// open when the other deleter removed it). Also when the last status says
+/// the name is not there at all: `std`'s `symlink_metadata`
 /// answers a denied open by looking the name up in its directory, and returns
 /// the first error when the name has gone meanwhile.
 ///
@@ -112,11 +117,15 @@ pub fn is_delete_pending(e: &io::Error) -> bool {
     // SAFETY: no arguments; it reads the calling thread's own environment
     // block, which exists for as long as the thread does.
     let status = unsafe { RtlGetLastNtStatus() };
-    status == STATUS_DELETE_PENDING || STATUS_NOT_THERE.contains(&status)
+    status == STATUS_DELETE_PENDING
+        || status == STATUS_FILE_DELETED
+        || STATUS_NOT_THERE.contains(&status)
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
+
     use super::*;
 
     fn code(n: i32) -> io::Error {
@@ -191,5 +200,97 @@ mod tests {
             }
         }
         assert!(!is_delete_pending(&code(ERROR_SHARING_VIOLATION)));
+    }
+
+    /// What Windows answers, call by call, about a folder that is being
+    /// deleted by someone else — marked and still named, or already unlinked
+    /// while a listing of it is open — and that each answer that is an error
+    /// reads as gone. The codes and statuses are printed, since they are what
+    /// this rule is made of.
+    #[test]
+    fn every_answer_about_a_folder_being_deleted_reads_as_gone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+        };
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_SHARE_ALL: u32 = 0x7;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        fn check(what: &str, result: io::Result<()>) {
+            let Err(e) = result else {
+                eprintln!("{what}: ok");
+                return;
+            };
+            // SAFETY: as in `is_delete_pending`; asked straight after.
+            let status = unsafe { RtlGetLastNtStatus() } as u32;
+            let gone = e.kind() == io::ErrorKind::NotFound || is_delete_pending(&e);
+            eprintln!("{what}: {e:?}, status {status:#010x}, gone {gone}");
+            assert!(gone, "{what}: {e:?}, status {status:#010x}");
+        }
+
+        // A folder marked for deletion by a handle still open: the name
+        // lingers until it closes.
+        let t = crate::test_support::TempTree::new("win-folder-going");
+        let marked = t.dir("marked");
+        let holder = std::fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&marked)
+            .unwrap();
+        let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+        // SAFETY: the handle is `holder`'s, opened for delete; `info` is a
+        // local of the class's struct and its size is passed.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                holder.as_raw_handle() as _,
+                FileDispositionInfo,
+                std::ptr::addr_of!(info).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+        check(
+            "lstat of a marked folder",
+            std::fs::symlink_metadata(&marked).map(drop),
+        );
+        check(
+            "listing a marked folder",
+            std::fs::read_dir(&marked).map(drop),
+        );
+        check("removing a marked folder", std::fs::remove_dir(&marked));
+        check(
+            "a file in a marked folder",
+            std::fs::write(marked.join("x"), b"x"),
+        );
+        drop(holder);
+
+        // A folder deleted while a listing of it is open.
+        let listed = t.dir("listed");
+        for i in 0..40 {
+            std::fs::write(listed.join(format!("{i:02}.txt")), b"x").unwrap();
+        }
+        let mut listing = std::fs::read_dir(&listed).unwrap();
+        let _first = listing.next();
+        for i in 0..40 {
+            let _ = std::fs::remove_file(listed.join(format!("{i:02}.txt")));
+        }
+        if let Err(e) = std::fs::remove_dir(&listed) {
+            // Not this rule's to judge: the listing's handle kept it.
+            eprintln!("removing a folder being listed: {e:?}; nothing more to see");
+            return;
+        }
+        for n in 0..100 {
+            match listing.next() {
+                None => break,
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    check(&format!("listing on, entry {n}"), Err(e));
+                    break;
+                }
+            }
+        }
     }
 }

@@ -113,7 +113,10 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(e) if gone(&e) => continue,
+                // The directory being listed has gone: there is nothing more
+                // to list. Stopped rather than asked again, because Windows'
+                // listing answers the same error to every later call.
+                Err(e) if gone(&e) => break,
                 Err(e) => return Err(DfError::io(path, e)),
             };
             remove_tree(&entry.path(), ctx)?;
