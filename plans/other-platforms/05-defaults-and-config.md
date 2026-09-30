@@ -53,8 +53,12 @@ Factual basis: `appendix-inventory-df-core.md` §2 `config`, `state`, `zoxide`,
       writers create on first write as today. Done when: a test per target asserts
       the paths with a controlled environment (`std::env::set_var` inside a lock,
       as the existing `state_path_from` tests do).
-- [ ] **D5.2** `README.md` gets a "Where things live" table per platform. Done
+- [>] **D5.2** `README.md` gets a "Where things live" table per platform. Done
       when: reviewed by Brian.
+      — port/windows-app (df-app), started 2026-09-29: written b60122c
+      (README, "Where things live"): the three columns of §1 as the files'
+      homes, the Windows ones as the df-core branch's D5.1 places them, and
+      the trash; waits for Brian's review.
 
 ## 2. Openers and rules (`platform::defaults`, M2.17 / W4.3)
 
@@ -119,12 +123,27 @@ which took pictures, video, sound and PDFs down to the fallback row.)
       `config::tests::a_text_file_opens_in_zed_first_everywhere` is the
       per-target test; the tests that pin Linux's openers and rules run on
       Linux and Windows, and `platform/macos/defaults.rs` pins macOS's.
-- [ ] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
+- [~] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
       the two-candidate Windows entries (and usable on macOS for `edit`). Done
       when: unit test with a fake `PATH`.
       — nothing to do on the macOS side (df-app, 2026-09-29): the macOS `edit` opener
       carries its fallback in its shell string (§2.1), so nothing there calls
       `first_available`; it is W4.3's, for the Windows argv entries.
+      — blocked (df-app, 2026-09-29): `first_available` has no caller until
+      §2.2's Windows table exists, and that table is df-core's
+      (`platform/windows/defaults.rs`, which re-exports Linux's until then),
+      which the df-app branch does not edit; nor does the plan say how one row
+      carries two candidates. Options: (a) the row's `run` holds both, one per
+      line, and df-app's Windows `spawn_detached` runs the first whose program
+      `first_available` finds on `PATH` (no config format change; a user's
+      one-line opener is one candidate); (b) the opener gains an optional
+      second command in df-core's `Opener` (a config format change, shown in
+      the `O` picker as one entry); (c) `Config::default` picks the candidate
+      when it builds the table on Windows, through
+      `platform::process::candidates` and `PATH`, and no `first_available` is
+      written (a program installed while delightfile runs is seen at the next
+      start). Until then a Windows config has Linux's openers, which name
+      programs Windows does not have.
 
 ## 3. Keymap
 
@@ -202,20 +221,32 @@ the README and for choosing defaults).
       log).
 - [ ] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
       `tar.exe` on Windows is W4.2). Done when: unit tests.
-- [ ] **D5.8** README "What it uses" table per platform from §4. Done when:
+- [>] **D5.8** README "What it uses" table per platform from §4. Done when:
       reviewed.
+      — port/windows-app (df-app), started 2026-09-29: written b60122c
+      (README, "What it uses"), from §4 with the df-core branch's `7za`; waits
+      for Brian's review.
 
 ## 5. Text
 
-- [ ] **D5.9** `cli::USAGE` head says "a keyboard-first file manager" (no
+- [x] **D5.9** `cli::USAGE` head says "a keyboard-first file manager" (no
       "for Wayland"); `platform::cli::EXTRA_USAGE` carries the `--portal` paragraph
       on Linux (S1.31). Crate descriptions in both `Cargo.toml`s and the `main.rs`
       doc comment updated in the same change. Done when: `--help` output snapshot
       test per target.
-- [ ] **D5.10** Help sheet (`help.rs`) and which-key: no text change beyond the
+      — done 5b43b31 for macOS and Windows: `platform::cli::TITLE_USAGE` is
+      the first line, and `the_help_is_the_platforms_own` holds each
+      platform's whole `--help`. Linux keeps "for Wayland", as the Phase 4
+      brief requires its `--help` unchanged; df-app's crate description names
+      the three platforms, the `main.rs` doc comment too (5722b0a); df-core's
+      description never named Wayland.
+- [x] **D5.10** Help sheet (`help.rs`) and which-key: no text change beyond the
       labels (M2.21). The `?` sheet's footer line naming the config path uses
       `platform::dirs::config_dir()` (verify it does not hard-code `~/.config`).
       Done when: grep finds no `.config/delightfile` literal in df-app.
+      — done, no change needed (df-app, 2026-09-29): the help sheet names no
+      config path, and `grep -rn "\.config/delightfile" crates/df-app/src`
+      finds nothing.
 
 ## 6. Bookmarks
 
@@ -280,9 +311,16 @@ the README and for choosing defaults).
   table, `%APPDATA%` written `~/AppData/Roaming` (f0d0573); the help
   sheet's "⌘-click toggles, ⌥-drag links" is left out and shown nowhere,
   the sheet having no mouse section (D5.5).
+- (df-app) 2026-09-29 — D5.9 keeps "for Wayland" in Linux's `--help`: the
+  Phase 4 brief holds Linux's `--help` to what it printed, and on Linux the
+  words are true. The first line is `platform::cli::TITLE_USAGE`, macOS and
+  Windows saying only "a keyboard-first file manager".
 
 ## Open questions
 
 - yazi's exact cache-dir suffix on macOS and Windows (verify at D5.1).
 - Whether `wt` should be the Windows terminal default (see `04-windows.md`).
 - Ghostty `-e` on macOS (see `02-macos.md`).
+- (df-app) D5.4: how a Windows opener row carries its two candidates, and which
+  branch writes §2.2's table into df-core's `platform/windows/defaults.rs`
+  (options under D5.4).
