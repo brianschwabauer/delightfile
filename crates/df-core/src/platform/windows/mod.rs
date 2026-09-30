@@ -13,6 +13,7 @@ pub mod pipe;
 pub mod process;
 pub mod socket;
 pub mod time;
+pub mod trash;
 pub mod user;
 
-pub use super::stub::{nofollow, thread, trash, watch, xattr};
+pub use super::stub::{nofollow, thread, watch, xattr};

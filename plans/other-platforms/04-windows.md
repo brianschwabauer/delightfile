@@ -62,7 +62,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       0.1.0`, run 36662477949), `tests/version.rs` checks `--version` and
       `--help` through a pipe on every target, and on the VM a double-click
       opened no console (07 §5.8).
-- [ ] **W4.2** `platform::process` Windows bodies: `NULL_DEVICE = "NUL"`;
+- [>] **W4.2** `platform::process` Windows bodies: `NULL_DEVICE = "NUL"`;
       `is_executable` = extension is in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`);
       `candidates("7z")` = `["7z.exe", "7z"]`, `candidates("bsdtar")` = `["bsdtar.exe",
       "tar.exe"]` (Windows ships libarchive's bsdtar as `tar.exe`; GNU-tar flags are
@@ -74,6 +74,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       so nothing flashes a console. Done when: `git status` on the runner spawns
       without a window (assert the flag in a unit test that inspects the builder,
       since the effect is not observable headlessly).
+      — port/windows-core (df-core), started 2026-09-29
 - [x] **W4.3** `platform::open` Windows body (S1.26 surface): `shell_argv` is
       replaced on Windows by `argv_from(command: &str, paths: &[PathBuf]) ->
       Vec<OsString>` implementing the Decisions' split-and-substitute rules
@@ -101,7 +102,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
 
 ## 2. Filesystem (df-core `platform/windows/`)
 
-- [ ] **W4.4** `platform::watch` backend with `ReadDirectoryChangesW`: one
+- [>] **W4.4** `platform::watch` backend with `ReadDirectoryChangesW`: one
       directory handle per watched dir opened with `FILE_LIST_DIRECTORY |
       FILE_SHARE_READ|WRITE|DELETE | FILE_FLAG_BACKUP_SEMANTICS |
       FILE_FLAG_OVERLAPPED`; filter `FILE_NOTIFY_CHANGE_FILE_NAME | DIR_NAME |
@@ -114,6 +115,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       deleted or renamed) → `Gone(dir)` and the handle closes. Done when: a
       Windows-runner test creates a file in a watched temp dir and receives
       `Changed` within one second; another deletes the dir and receives `Gone`.
+      — port/windows-core (df-core), started 2026-09-29
 - [x] **W4.5** `platform::meta` real bodies (P3.4 specified them; P3.4 may have
       shipped the minimal version): `dev` = `GetVolumeInformationW` serial of the
       path's root, cached per root for the process; `ino` = `0` unless the caller
@@ -133,7 +135,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       volume serial of the file's own handle, not a per-root cache), asked by
       `same_file` and, for regular files only (`maybe_linked`), by the du
       walk's hard-link dedupe. `blocks_bytes` is split out as W4.35.
-- [ ] **W4.6** `platform::fs` Windows bodies S1.5 left as stubs (this task
+- [>] **W4.6** `platform::fs` Windows bodies S1.5 left as stubs (this task
       supersedes S1.5's `writable`): `symlink` maps
       `ERROR_PRIVILEGE_NOT_HELD` (1314) to `DfError::Op("Creating links needs
       Developer Mode or an elevated process")`; `set_times` opens the handle with
@@ -141,7 +143,8 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       `apply_mode` sets/clears `FILE_ATTRIBUTE_READONLY`; `writable(dir)` tries to
       create and delete a `.df-write-test-<pid>` file (there is no `access(W_OK)`
       that respects ACLs). Done when: tests on the runner.
-- [ ] **W4.7** `platform::trash` Windows body: `Trash::trash(path)` calls
+      — port/windows-core (df-core), started 2026-09-29
+- [>] **W4.7** `platform::trash` Windows body: `Trash::trash(path)` calls
       `SHFileOperationW` with `wFunc = FO_DELETE`, `pFrom` = the path as a
       double-NUL-terminated wide string — **never** with a `\\?\` prefix, which
       `SHFileOperationW` rejects outright; a path at or over `MAX_PATH` (260) is
@@ -158,6 +161,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       must fall back to the permanent-delete confirm as it does for remote rows).
       Done when: a runner test trashes a temp file and it is gone from the
       directory (the bin itself cannot be inspected headlessly).
+      — port/windows-core (df-core), started 2026-09-29
 - [~] **W4.8** df-app: `u` after a trash on Windows → the undo journal entry for a
       trash carries `restorable: false` and `App::undo` toasts "Restore it from the
       Recycle Bin" (`ops/journal.rs` gains the flag; Linux/macOS set `true`).
@@ -336,7 +340,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 
 ## 6. SFTP (df-core `platform/windows/pipe.rs` and `vfs/conn.rs`)
 
-- [ ] **W4.20** `platform::pipe` Windows design: `Transport::spawn` (`vfs/conn.rs:161–188`)
+- [>] **W4.20** `platform::pipe` Windows design: `Transport::spawn` (`vfs/conn.rs:161–188`)
       keeps `stdin` synchronous and starts two threads, `df-sftp-out` and
       `df-sftp-err`, each looping `read` into 64 KiB chunks sent over a
       `crossbeam_channel::Sender<Vec<u8>>` (bounded 64). `fill` (`:271–308`) becomes
@@ -350,11 +354,13 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       which unblocks the threads. Done when: `vfs/tests.rs`'s replay tests get a
       Windows twin using a small Rust replay binary (`tests/bin/replay.rs`) instead
       of `/bin/sh`, and pass on the runner.
-- [ ] **W4.21** `vfs/config.rs:181–202` (`Service::command`): `ssh` resolves through
+      — port/windows-core (df-core), started 2026-09-29
+- [>] **W4.21** `vfs/config.rs:181–202` (`Service::command`): `ssh` resolves through
       `candidates("ssh")` (`ssh.exe` from Windows OpenSSH is on `PATH` by default);
       `-i ~/.ssh/key` expands `~` with `platform::dirs::home()`; `quiet(&mut cmd)`
       applied. `vfs/mod.rs:657–668` temp names sanitized (P3.21). Done when: live
       check V7 §5.7.
+      — port/windows-core (df-core), started 2026-09-29
 
 ## 7. Fonts, graphics, dirs
 
@@ -370,7 +376,8 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       found it, a CPU adapter is logged as WARP, since wgpu ranks a software
       adapter last but takes it when it is all there is, which is how the VM
       got one from the first request.
-- [ ] **W4.24** `platform::dirs` Windows values (D5.1). Done when: D5.1 done.
+- [>] **W4.24** `platform::dirs` Windows values (D5.1). Done when: D5.1 done.
+      — port/windows-core (df-core), started 2026-09-29
 - [x] **W4.25** Keyboard: AltGr. On a layout where `@`/`€` need AltGr, winit reports
       Ctrl+Alt held. `platform::keys::mods` on Windows: when both `control_key()`
       and `alt_key()` are set **and** the event carries printable `text`, treat the
@@ -461,7 +468,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 
 ## 9. Found in Phase 1
 
-- [ ] **W4.31** `platform::process::tie_to_this_thread` Windows body (S1.50),
+- [>] **W4.31** `platform::process::tie_to_this_thread` Windows body (S1.50),
       in place of the no-op under which a child outlives a crashed delightfile:
       put the child in a job object created with
       `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`CreateJobObjectW`,
@@ -469,7 +476,8 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       the handle held by the owning worker, so the system ends the child when
       the last handle closes — however the process died. Done when: a runner
       test ends the parent with `TerminateProcess` and sees the child gone.
-- [ ] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
+      — port/windows-core (df-core), started 2026-09-29
+- [>] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
       socket, which `std` cannot connect to on Windows, so `platform::socket` is
       refused there and every cloud remote says "Cloud remotes is not available
       on this platform". Choose the transport and record it: Windows 10's own
@@ -479,6 +487,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       password, since a loopback port is open to every local user. Then give
       `platform/windows/socket.rs` that body and `AVAILABLE = true`. Done when:
       `vfs/rclone_tests.rs` runs on the Windows runner.
+      — port/windows-core (df-core), started 2026-09-29
 - [~] **W4.34** Take `-A dead_code` off the windows job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
@@ -505,7 +514,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 
 ## 10. Found in Phase 3
 
-- [ ] **W4.35** `platform::meta::blocks_bytes` on Windows, split from W4.5
+- [>] **W4.35** `platform::meta::blocks_bytes` on Windows, split from W4.5
       when P3.4 did its identity half: the allocated size by
       `GetCompressedFileSizeW` (compressed and sparse files report what they
       occupy, as `st_blocks` does), in place of the file size. It needs the
@@ -513,14 +522,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `blocks_bytes(path, &meta)` (Unix: off the `stat`, the path unread) and
       the du walk's `sizes_of` passes the entry's path. Done when: a du test on
       the runner sees a sparse file's total below its length.
-- [ ] **W4.36** `platform::time::local_civil` before 1970 on Windows: the
+      — port/windows-core (df-core), started 2026-09-29
+- [>] **W4.36** `platform::time::local_civil` before 1970 on Windows: the
       CRT's `localtime_s` refuses a negative `time_t`, so a file dated before
       the epoch has no civil date and the bulk card's date tokens say so. Use
       `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime` (windows-sys,
       `Win32_System_Time`) from the `FILETIME` the seconds make, which covers
       1601 onwards. Done when: `rename::facts::tests::a_time_before_the_epoch_is_still_a_date`
       loses its `#[cfg(unix)]` and passes on the runner.
-- [ ] **W4.37** `ops::delete::remove_tree`'s "already gone" on Windows: a file
+      — port/windows-core (df-core), started 2026-09-29
+- [>] **W4.37** `ops::delete::remove_tree`'s "already gone" on Windows: a file
       another deleter has marked for deletion answers `ERROR_ACCESS_DENIED`
       (`STATUS_DELETE_PENDING` underneath) to the next open or delete, where
       Unix answers `ENOENT`, so two deletes of one tree race to a failure.
@@ -529,6 +540,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       lists as gone — and let `gone` ask it. Done when:
       `ops::delete::tests::a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure`
       loses its `#[cfg(unix)]` and passes on the runner.
+      — port/windows-core (df-core), started 2026-09-29
 
 ## Decisions log
 
@@ -642,6 +654,24 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   Windows, and the rest of what is dead there is the drag picture and
   `Event::DragEnded`, whose caller is the skipped W4.27. The windows job keeps
   the flag until W4.27 is done.
+- (df-core) 2026-09-29 — W4.7: a path is recycled only on a fixed drive
+  (`GetDriveTypeW` of its volume is `DRIVE_FIXED`), not on a fixed *or
+  removable* one as the task said. Windows keeps no Recycle Bin on removable
+  media, and there `SHFileOperationW` under `FOF_NOCONFIRMATION` deletes for
+  good without a word; refusing (`"<volume> has no Recycle Bin"`) sends `d` to
+  the permanent-delete confirm, which is what the task asks for wherever there
+  is no bin. `Trash::trash` asks it too, so a redo through `Trash::at` cannot
+  reach such a drive either.
+- (df-core) 2026-09-29 — W4.7: a verbatim path (`\\?\C:\…`, `\\?\UNC\…`) is
+  handed to the shell in its plain spelling, which names the same file; one
+  whose plain spelling would name another (a `.` or `..` name, a name ending
+  in a dot or a space, a `/` inside a name) or that has none (a volume GUID, a
+  device) is refused before the call, as the too-long path is.
+- (df-core) 2026-09-29 — W4.7: the Windows trash has its own `TrashedItem`,
+  `Purged` and date helpers (the stub's, copied), and `platform/stub/trash.rs`
+  is compiled for macOS alone. Reason: Windows' item is a real one whose
+  location is unknown rather than a stand-in, and a stub module Windows no
+  longer re-exports would be dead code there.
 
 ## Open questions
 
@@ -664,3 +694,12 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   which needs a count-only variant of `ConfirmKind::EmptyTrash`. Until chosen
   it is refused with the rest of the trash, and after W4.7 lands it would say
   "The trash is already empty".
+- (df-core) W4.7: a file too big for its drive's Recycle Bin (over the bin's
+  size limit) is deleted for good by `SHFileOperationW` under
+  `FOF_NOCONFIRMATION`, without a word — the flags the task names. Options:
+  (a) add `FOF_WANTNUKEWARNING`, so the shell asks "permanently delete?" in
+  its own dialog before it does, and a No aborts (the item is then refused
+  as cancelled); the dialog is the shell's, owned by no window of ours;
+  (b) `IFileOperation` with `FOFX_RECYCLEONDELETE`, which refuses instead of
+  deleting — COM, deferred with W4.27/W4.28; (c) keep the flags and accept
+  it. Until decided, (c).
