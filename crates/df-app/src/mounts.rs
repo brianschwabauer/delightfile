@@ -2521,6 +2521,7 @@ pub(crate) mod tests {
     /// mounted; a share its URL; a remote its service by name; a place its
     /// path, with its key as a chip.
     #[test]
+    #[cfg(unix)] // gvfs's phones and mounts, with Unix paths (W4.26)
     fn every_row_says_what_it_is_after_its_name() {
         let palette = palette();
         let mut card = Card::with_places(places(2));

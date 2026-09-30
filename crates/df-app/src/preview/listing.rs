@@ -913,8 +913,13 @@ Offset = 63
 
         let missing = tree.join("gone.zip");
         let reason = list_with(&missing, None, &|| false).unwrap_err();
+        // In the system's own words, which are Linux's "No such file or
+        // directory" and Windows' "The system cannot find the file
+        // specified" (W4.26).
+        let system = std::fs::File::open(&missing).expect_err("gone").to_string();
+        let words = system.split(" (os error").next().unwrap_or(&system);
         assert!(
-            reason.starts_with("No such file"),
+            reason.starts_with(words),
             "an unreadable file says why: {reason}"
         );
     }

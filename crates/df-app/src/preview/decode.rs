@@ -1366,7 +1366,10 @@ mod tests {
 
     /// The generated fixtures (`build/test-assets.sh`), or `None` with a
     /// printed reason where there is no `ffmpeg` CLI to make them — the same
-    /// gate dv-media's own integration tests use.
+    /// gate dv-media's own integration tests use — or no `bash` that can run
+    /// the script and find `ffmpeg` itself. On Windows `bash` is WSL's
+    /// launcher in `System32` before anything on `PATH`, and with no
+    /// distribution installed it runs nothing (W4.26).
     fn media_fixtures() -> Option<PathBuf> {
         let ffmpeg = std::process::Command::new("ffmpeg")
             .arg("-version")
@@ -1375,6 +1378,15 @@ mod tests {
             .unwrap_or(false);
         if !ffmpeg {
             eprintln!("SKIP: `ffmpeg` CLI not on PATH — cannot generate the media fixtures");
+            return None;
+        }
+        let bash = std::process::Command::new("bash")
+            .args(["-c", "command -v ffmpeg >/dev/null"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !bash {
+            eprintln!("SKIP: no `bash` that can run build/test-assets.sh with `ffmpeg`");
             return None;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)?;
