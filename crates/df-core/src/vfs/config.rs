@@ -284,14 +284,23 @@ impl Service {
     ///   ("Connection timed out"), where ours can only say that nothing arrived.
     /// - `-x` — no X11 forwarding for a file transfer, ever.
     /// - `-p` and `-i` only when the file said so, so `~/.ssh/config` stays in
-    ///   charge of what the file left out.
+    ///   charge of what the file left out; `-i ~/…` has its `~` expanded
+    ///   ([`Service::key_path`]), since no shell will.
+    ///
+    /// Either way the child is a console tool run headless
+    /// ([`crate::platform::process::quiet`]: no console window on Windows).
+    /// `ssh` is found by `std`'s own lookup, which on Windows adds the `.exe`
+    /// that [`crate::platform::process::candidates`] would, and finds Windows'
+    /// own OpenSSH on `PATH` as it ships.
     pub fn command(&self) -> std::process::Command {
         if let Some((program, args)) = &self.program {
             let mut command = std::process::Command::new(program);
             command.args(args);
+            crate::platform::process::quiet(&mut command);
             return command;
         }
         let mut command = std::process::Command::new("ssh");
+        crate::platform::process::quiet(&mut command);
         command.arg("-x");
         command.arg("-o").arg("BatchMode=yes");
         command.arg("-o").arg(format!(

@@ -790,6 +790,17 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   Windows twin of the same name: a replay server that answers the
   handshake and one `STAT`, ended by `taskkill` through the pid file it
   writes.
+- (df-core) 2026-09-29 — W4.21: `ssh` is not resolved by hand through
+  `candidates`. `std`'s Windows lookup adds `.exe` to a bare name and
+  searches `PATH` (after the program's own directory and the system's),
+  finding the `ssh.exe` that `candidates("ssh")` names first, and Windows'
+  OpenSSH is on `PATH` as it ships; resolving it here would also have put a
+  full path into Linux's argv and error text for nothing. `quiet` is applied
+  to `ssh` and to a `program` service. The key's `~` was already expanded
+  through `platform::dirs::home` (`path::expand_home`), and the download
+  temp names made valid in Phase 3 (P3.21). A test runs the real `ssh`
+  against a closed port wherever there is one and reads its refusal off
+  stderr through the new pipes.
 
 ## Open questions
 

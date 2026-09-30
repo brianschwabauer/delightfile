@@ -777,6 +777,25 @@ fn the_ssh_command_line_is_exactly_what_the_design_promises() {
     assert!(joined.contains("-i /k"), "{joined}");
 }
 
+/// The real `ssh`, where there is one, run as a service runs it: found on
+/// `PATH` (on Windows by the `.exe` the lookup adds, Windows' own OpenSSH),
+/// started headless, and its refusal to reach a closed port read off stderr
+/// into the error — not a spawn failure, not a hang.
+#[test]
+fn the_real_ssh_says_why_it_could_not_connect() {
+    let mut service = Service::new("s", "127.0.0.1");
+    // Port 1 is closed wherever this runs, so nothing is ever logged in to.
+    service.port = 1;
+    let error = connect_err(service, "nothing listens on port 1");
+    match &error {
+        VfsError::Spawn { .. } => eprintln!("skipping: no ssh here ({error})"),
+        VfsError::Disconnected { detail, .. } | VfsError::Auth { detail, .. } => {
+            assert_ne!(detail, "the connection closed", "ssh's own words were lost");
+        }
+        other => panic!("expected ssh's refusal, got {other}"),
+    }
+}
+
 // ── VfsPath ─────────────────────────────────────────────────────────────────
 
 #[test]
