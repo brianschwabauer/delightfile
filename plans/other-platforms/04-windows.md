@@ -822,14 +822,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   asking again (Windows answers every later call the same; on Unix the
   listing had already ended), and `STATUS_FILE_DELETED` — a call on a folder
   deleted since it was opened — reads as gone too.
-- (df-core) 2026-09-29 — W4.7 turns one df-app test red on Windows, left
-  for W4.8 on the df-app branch rather than edited here (the brief keeps
-  this branch out of df-app but for compile fixes, and W4.8 rewrites that
-  path): `app::tests::the_trash_is_refused_where_the_platform_has_none`,
-  under `cfg(not(target_os = "linux"))` "until M2.8 and W4.7", expects `d`
-  to refuse with "Trash is not available on this platform"; Windows now has
-  the Recycle Bin, so its gate becomes `cfg(target_os = "macos")`. With it,
-  df-app fails 15 of 1,117 on the runner where `main` fails 14.
+- (df-core) 2026-09-29 — W4.7 turned one df-app test red on Windows:
+  `app::tests::the_trash_is_refused_where_the_platform_has_none`, under
+  `cfg(windows)` "until W4.7", expected `d`, the trash's door and "Empty
+  trash" to refuse with "Trash is not available on this platform". With the
+  Recycle Bin every platform has a trash, so the test is now
+  `the_trash_is_there_on_every_platform`, which runs on all three and holds
+  that none of the three is refused that way. The df-app edit is this
+  branch's, being the few lines W4.7's landing needs (allowed for W4.8's
+  sake); the gate in `App::refusal` it tested is left as it is, and never
+  refuses now.
 - (df-core) 2026-09-29 — W4.8, "Empty trash" on Windows: option (b) of the
   question the df-app branch asked, decided for Brian and relayed to this
   branch, which takes the question out of Open questions. df-core gives

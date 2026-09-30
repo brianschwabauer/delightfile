@@ -22414,23 +22414,20 @@ mod tests {
         app.toasts.current().map(|toast| toast.message.as_str())
     }
 
-    /// A platform with no trash yet (Windows until W4.7): `d` on a local
-    /// file, the trash view and emptying it are refused in the stub's own
-    /// words, and the key says so and deletes nothing (S1.6, S1.34). Linux
-    /// always has a home trash and macOS has Finder's (M2.8), so there is
-    /// nothing to refuse there and this runs on Windows alone.
+    /// Every platform has a trash now — Linux the freedesktop one, macOS
+    /// Finder's (M2.8), Windows the Recycle Bin (W4.7) — so `d` on a local
+    /// file, the trash's door and "Empty trash" pass the gate that turned
+    /// them away when Windows had none (S1.6, S1.34).
     #[test]
-    #[cfg(windows)]
-    fn the_trash_is_refused_where_the_platform_has_none() {
-        let mut app = Fixture::new("no-trash", &["a.txt"]);
-        let now = Instant::now();
-        let refusal = Some("Trash is not available on this platform");
+    fn the_trash_is_there_on_every_platform() {
+        let app = Fixture::new("a-trash", &["a.txt"]);
         for command in [Command::Trash, Command::OpenTrash, Command::EmptyTrash] {
-            assert_eq!(app.refusal(command), refusal, "{command:?}");
+            assert_ne!(
+                app.refusal(command),
+                Some("Trash is not available on this platform"),
+                "{command:?}"
+            );
         }
-        app.run(Command::Trash, 10, now);
-        assert_eq!(toast_text(&app), refusal);
-        assert!(app.files.join("a.txt").exists(), "d deleted nothing");
     }
 
     /// `C` over a file on this machine is refused where the platform gives a
