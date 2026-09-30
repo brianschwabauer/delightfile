@@ -326,7 +326,7 @@ fn list_compressed_tar(
     // reads it directly, so there is no second thread and no chance of the
     // classic deadlock where the parent blocks writing stdin while the child
     // blocks writing stdout.
-    let mut child = Command::new(binary)
+    let mut child = crate::platform::process::quiet(&mut Command::new(binary))
         .arg("-dc")
         .stdin(Stdio::from(file))
         .stdout(Stdio::piped())
@@ -390,7 +390,7 @@ fn list_compressed_tar(
 /// can grey a row out; the listing path finds out by spawning and reads the
 /// `NotFound` directly.
 fn have(binary: &str) -> bool {
-    Command::new(binary)
+    crate::platform::process::quiet(&mut Command::new(binary))
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

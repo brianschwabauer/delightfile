@@ -77,6 +77,7 @@
 //! | `process` | `RSYNC_HINT: &str` (what "needs …" names in place of the bare "rsync"; empty: "rsync") | `""` | "rsync 3.1 or newer — `brew install rsync`" | `""` |
 //! | `process` | `pause(&Child)`, `resume(&Child)` `-> io::Result<()>` | `SIGSTOP` / `SIGCONT` (unix) | unix | `Unsupported` (W4.2) |
 //! | `process` | `terminate(&mut Child) -> io::Result<()>` (not a reaped one) | `kill(SIGTERM)` (unix) | unix | `Child::kill` |
+//! | `process` | `quiet(&mut Command) -> &mut Command`: a console tool run headless (`git`, `7z`, `tar`, the decompressors, `ssh`, `rclone`), never an opener | nothing (unix) | unix | `CREATE_NO_WINDOW`, the only creation flag df-core sets (W4.2) |
 //! | `process` | `tie_to_this_thread(&mut Command)` (re-exported as `vfs::child`) | `prctl(PR_SET_PDEATHSIG)` + `getppid` in `pre_exec` | `getppid`, then a watcher forked in `pre_exec` waits in kqueue on `NOTE_EXIT` and sends `SIGTERM`: tied to the process | nothing (W4.31) |
 //! | `process` | `exit_code(&ExitStatus) -> i32` (what a shell's `$?` would say; df-app's blocking opener) | the code, else 128 + the signal (unix) | unix | the code, else 1 (never reached: Windows always has one) |
 //! | `process` | `is_executable(&Path) -> bool` | an execute bit (unix) | unix | extension in `PATHEXT` |

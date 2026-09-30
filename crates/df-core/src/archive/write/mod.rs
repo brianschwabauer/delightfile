@@ -701,7 +701,7 @@ fn piped(
         Format::TarXz => &["-z", "-c", "-q", "-T0"],
         _ => &["-q", "-c", "-T0"],
     };
-    let mut child = Command::new(tool)
+    let mut child = crate::platform::process::quiet(&mut Command::new(tool))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(file))

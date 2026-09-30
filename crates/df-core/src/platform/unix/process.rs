@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::Path;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 
 /// The file that discards what is written to it and reads as empty.
 pub const NULL_DEVICE: &str = "/dev/null";
@@ -61,6 +61,12 @@ pub fn terminate(child: &mut Child) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Nothing: a tool started here has no console window to hide (Windows'
+/// `CREATE_NO_WINDOW`). Returns `command` for chaining.
+pub fn quiet(command: &mut Command) -> &mut Command {
+    command
 }
 
 /// The number a finished child exited with, as a shell's `$?` says it.

@@ -278,7 +278,7 @@ pub enum StatusError {
 ///   This is the flag that makes background polling safe, and it is the one that
 ///   would be easiest to forget.
 pub fn status_blocking(root: &Path) -> Result<StatusData, StatusError> {
-    let mut child = Command::new("git")
+    let mut child = crate::platform::process::quiet(&mut Command::new("git"))
         // The repository is untrusted content. `.git/config` is read before
         // anything else git does, and several of its keys are *command lines*:
         // a directory that arrived in an archive, on a stick, or out of a

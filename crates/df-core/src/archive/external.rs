@@ -205,6 +205,7 @@ pub fn run(program: &Path, args: &[OsString], ctx: &TaskCtx) -> Result<Ran> {
 /// members of an archive it is writing.
 pub fn run_in(program: &Path, args: &[OsString], dir: Option<&Path>, ctx: &TaskCtx) -> Result<Ran> {
     let mut command = Command::new(program);
+    process::quiet(&mut command);
     if let Some(dir) = dir {
         command.current_dir(dir);
     }

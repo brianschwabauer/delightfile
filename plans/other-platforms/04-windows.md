@@ -542,6 +542,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       loses its `#[cfg(unix)]` and passes on the runner.
       — port/windows-core (df-core), started 2026-09-29
 
+## 11. Found in Phase 4
+
+- [ ] **W4.38** df-app's console tools through `df_core::platform::process::quiet`
+      (W4.2's df-app half, split off because the df-core branch keeps out of
+      df-app): the 7-Zip and tar listings in `preview/listing.rs` (`:324`,
+      `:379`, `:930`) and any other console program df-app starts headlessly,
+      so none flashes a console window on Windows. Never an opener or a new
+      window of delightfile itself. Done when: each such `Command` goes
+      through `quiet` (grep), and the listing tests pass on the runner.
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.
@@ -698,6 +708,23 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   name gone after a denied open. On Linux `is_delete_pending` is `false` and
   `gone` is the `NotFound` check it was; the top `lstat` of `remove_tree` now
   asks `gone` too, the same check there.
+- (df-core) 2026-09-29 — W4.2: `quiet(&mut Command) -> &mut Command` sets
+  `CREATE_NO_WINDOW` on Windows and nothing elsewhere, and returns the
+  command so a builder chain takes it in place. Every console tool df-core
+  starts goes through it: `git status`, the decompressors (listing and
+  unpacking a compressed tar), the compressors behind `A`, 7-Zip and bsdtar
+  (extracting, `A` to 7z), the version probe that greys a format out,
+  `rclone`, and — with W4.21 — `ssh` and a `program` service. Not `rsync`,
+  which is never started on Windows (`HAS_RSYNC`). df-app's own are W4.38.
+  The test checks the flag by value and that a quiet tool's pipes still
+  carry its output: `std` has no getter for a command's creation flags, and
+  a console that never opens cannot be seen headlessly.
+- (df-core) 2026-09-29 — W4.2: `CREATE_NEW_PROCESS_GROUP` is not df-core's.
+  It detaches an opener from the app (`00-ground-rules.md` §5), df-core
+  starts no opener, and df-app's `platform::open` is where openers are
+  detached (macOS's `detach` is there), so it is W4.3's. `NULL_DEVICE`,
+  `is_executable`, `candidates`, `exit_code`, `pause`/`resume` and
+  `terminate` (`Child::kill`, `TerminateProcess`) were written in Phase 1.
 
 ## Open questions
 

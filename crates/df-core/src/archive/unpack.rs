@@ -597,7 +597,7 @@ fn extract_compressed_tar(path: &Path, format: ArchiveFormat, sink: &mut Sink<'_
         )));
     };
     let file = File::open(path).map_err(|e| DfError::io(path, e))?;
-    let mut child = std::process::Command::new(binary)
+    let mut child = crate::platform::process::quiet(&mut std::process::Command::new(binary))
         .arg("-dc")
         .stdin(std::process::Stdio::from(file))
         .stdout(std::process::Stdio::piped())

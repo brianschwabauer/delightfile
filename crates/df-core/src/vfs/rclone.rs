@@ -255,6 +255,7 @@ impl Daemon {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        crate::platform::process::quiet(&mut command);
         // This is the worker thread that will own the daemon, so its end —
         // however it comes — is the daemon's too.
         child::tie_to_this_thread(&mut command);
