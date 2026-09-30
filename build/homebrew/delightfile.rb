@@ -1,7 +1,8 @@
 # The Homebrew cask for delightfile
 # (plans/other-platforms/06-build-and-release.md B6.24). The release workflow
 # fills in the version, the dmg's sha256 and the oldest macOS the bundle
-# starts on, and attaches the result to the release as delightfile.rb. It
+# starts on (a bare macOS symbol means that release or later, in Homebrew's
+# own style), and attaches the result to the release as delightfile.rb. It
 # belongs in brianschwabauer/homebrew-tap as Casks/delightfile.rb, which is
 # what makes `brew install --cask brianschwabauer/tap/delightfile` work.
 #
@@ -23,7 +24,7 @@ cask "delightfile" do
   end
 
   depends_on arch: :arm64
-  depends_on macos: ">= :@MACOS@"
+  depends_on macos: :MACOS_MINIMUM
 
   app "delightfile.app"
 

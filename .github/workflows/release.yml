@@ -298,11 +298,14 @@ jobs:
             26) macos=tahoe ;;
             *) echo "::error::no Homebrew name for macOS $MINIMUM; add it here"; exit 1 ;;
           esac
-          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$dmg.sha256")/g" -e "s/@MACOS@/$macos/g" \
+          # The oldest macOS is a bare symbol, which brew style wants and
+          # which means that release or later; the template holds the
+          # symbol :MACOS_MINIMUM so that it is Ruby before it is filled.
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$dmg.sha256")/g" -e "s/:MACOS_MINIMUM/:$macos/g" \
             build/homebrew/delightfile.rb > dist/delightfile.rb
           sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$zip.sha256")/g" \
             build/scoop/delightfile.json > dist/delightfile.json
-          if grep -n '@[A-Z0-9_]*@' dist/delightfile.rb dist/delightfile.json; then
+          if grep -n -e '@[A-Z0-9_]*@' -e MACOS_MINIMUM dist/delightfile.rb dist/delightfile.json; then
             echo "::error::a placeholder was left unfilled"
             exit 1
           fi
