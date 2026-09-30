@@ -459,7 +459,25 @@ release zip is run.
     `delightfile\titlebar-f2cd5c8\`, and not run either: the VM was still
     at its lock screen (`titlebar/shots/02-vm-still-locked-f2cd5c8.jpg`),
     and nothing was pressed.
-  - Not seen: every W4.39 line in §5.1.
+  - The same build, once the coordinator had restarted the VM (it signs in
+    by itself on boot), opened from the share after the Run prompt: **one
+    header** (`titlebar/shots/10-f2cd5c8-single-header.jpg`, enlarged in
+    `10-crop-left.png` and `10-crop-buttons.png`). No "delightfile" caption
+    is left over the window; its top row — ☰, `\\host.lan\Data ›
+    delightfile › titlebar-f2cd5c8`, `1 / 8` — is the top of the window, on
+    the window's own corners and shadow, and the three buttons the window
+    draws, minimize, maximize and close in Windows 11's shapes, sit at its
+    right end with the counter's row a gap short of them. It drew on the
+    software adapter as before.
+  - Then the viewer failed: after the pointer was put over Maximize for
+    Snap Layouts, two captures in a row came back 310 × 45 pixels
+    (`11-…`, `12-…`) and the next timed out, so the run stopped there, by
+    the rule for a viewer that misbehaves twice running. The window was
+    left open on the VM's desktop; nothing else was pressed.
+  - Not seen: the other W4.39 lines in §5.1 — a drag, a double click and a
+    right click on the band, Snap Layouts, the three buttons' hover, press
+    and commands, ☰, two tabs in the band, a maximized window and the
+    theme switch.
 
 ## 6. Release gate
 

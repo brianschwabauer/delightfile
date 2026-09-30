@@ -645,9 +645,10 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       — titlebar agent (`port/titlebar`), started 2026-09-30; e40bc6b,
       04a3425, then the window's own buttons in 77f803f and f2cd5c8, green on
       the Windows runner at run 36731513722 (df-app 1,163 there, the caption
-      tests among them). The on-screen half has not been seen: both times
-      the build was ready the VM was at its lock screen, whose sign-in an
-      agent may not pass (07 §5.8); the build waits in the share.
+      tests among them). On the VM (07 §5.8) the window has one header, its
+      top row at the top of the window and the drawn buttons at its right
+      end; the viewer failed before the rest of §5.1's W4.39 lines could be
+      tried, so they are still to see.
 
 ## Decisions log
 
