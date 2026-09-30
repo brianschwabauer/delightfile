@@ -5,27 +5,29 @@
 //! On Windows the top row — or, with two tabs or more, the tab strip — is
 //! drawn where the system's title bar was, and the system keeps the rest of
 //! the title bar's work: dragging the window, a double click that maximizes,
-//! the system menu on a right click, the resize edge along the top, and the
-//! three caption buttons with Snap Layouts under the middle one. The system
-//! learns which is which by asking the window, point by point
-//! (`WM_NCHITTEST`); this module is the answer, without a line of Win32 in
-//! it, so it is tested on every target.
+//! the system menu on a right click, the resize edge along the top. The
+//! three caption buttons are the window's own, drawn by it at the band's
+//! right end, and the system is told they are caption buttons so that Snap
+//! Layouts still comes up under Maximize. The system learns which is which
+//! by asking the window, point by point (`WM_NCHITTEST`); this module is the
+//! answer, and the buttons' reading of the pointer the system then reports,
+//! without a line of Win32 in it, so both are tested on every target.
 //!
-//! The answer comes from three things. The *frame*: how wide the window is,
+//! The answer comes from two things. The *frame*: how wide the window is,
 //! how thick its resize edge, whether it is maximized (a maximized window
-//! has no edge to take hold of) and where the caption buttons are. The
-//! *band*: the strip across the top that is the title bar's, as the window
-//! last laid it out. The *controls*: the rects in the band that are the
-//! window's own — ☰, a crumb, the counter, a tab chip, its `×`, the `+` —
-//! reported after every layout. A point in the band on none of them is the
-//! title bar's; everything below the band is the window's.
+//! has no edge to take hold of). The *regions*: the strip across the top
+//! that is the title bar's, the three buttons at its right end, and the
+//! rects in it that are the window's own controls — ☰, a crumb, the counter,
+//! a tab chip, its `×`, the `+` — all as the window last laid them out. A
+//! point in the band on none of them is the title bar's; everything below
+//! the band is the window's.
 //!
 //! Everything here is physical pixels in the window's client coordinates,
 //! which is what the system hands over. The layout is in logical points, so
 //! a rect is taken out to the whole pixels it touches ([`Px::around`]): a
 //! control whose edge falls inside a pixel owns that pixel.
 
-use crate::ui::TitleBand;
+use crate::ui::{CaptionButton, CaptionPointer};
 
 /// A rectangle in physical pixels, client coordinates: left and top inside
 /// it, right and bottom just outside, as a Win32 `RECT` is.
@@ -50,10 +52,6 @@ impl Px {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 
-    pub fn width(&self) -> i32 {
-        self.right - self.left
-    }
-
     /// `rect`, in logical points at `scale`, out to every pixel it touches.
     pub fn around(rect: egui::Rect, scale: f64) -> Px {
         let at = |value: f32| f64::from(value) * scale;
@@ -62,16 +60,6 @@ impl Px {
             top: at(rect.min.y).floor() as i32,
             right: at(rect.max.x).ceil() as i32,
             bottom: at(rect.max.y).ceil() as i32,
-        }
-    }
-
-    /// The same rectangle moved by `(dx, dy)`.
-    pub fn moved(&self, (dx, dy): (i32, i32)) -> Px {
-        Px {
-            left: self.left + dx,
-            top: self.top + dy,
-            right: self.right + dx,
-            bottom: self.bottom + dy,
         }
     }
 }
@@ -88,10 +76,8 @@ pub enum Hit {
     Top,
     TopLeft,
     TopRight,
-    /// The three caption buttons.
-    Minimize,
-    Maximize,
-    Close,
+    /// One of the three caption buttons.
+    Button(CaptionButton),
 }
 
 /// The window, as the hit test needs it.
@@ -104,15 +90,16 @@ pub struct Frame {
     /// A maximized window has no edge to resize by: the band runs to the
     /// top of the screen, where a drag from the top is a drag of the window.
     pub maximized: bool,
-    /// Where the caption buttons are, when the system says.
-    pub buttons: Option<Px>,
 }
 
-/// What the window last said about its band: where it is, and which rects in
-/// it are the window's own controls.
+/// What the window last said about its band: where it is, where its three
+/// caption buttons are, and which rects in it are the window's own
+/// controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Regions {
     pub band: Px,
+    /// Minimize, maximize, close, left to right.
+    pub buttons: Option<[Px; 3]>,
     pub controls: Vec<Px>,
 }
 
@@ -121,18 +108,20 @@ impl Regions {
     /// otherwise.
     pub const NONE: Regions = Regions {
         band: Px::EMPTY,
+        buttons: None,
         controls: Vec::new(),
     };
 }
 
-/// What `at` is. In this order: a caption button, which the system draws and
-/// which must answer wherever it is drawn; the resize edge along the top,
-/// unless the window is maximized; below the band, the window's; on one of
-/// the window's controls, the window's; and anywhere else in the band, the
-/// title bar.
+/// What `at` is. In this order: a caption button, which answers wherever it
+/// is drawn; the resize edge along the top, unless the window is maximized;
+/// below the band, the window's; on one of the window's controls, the
+/// window's; and anywhere else in the band, the title bar.
 pub fn classify(at: (i32, i32), frame: &Frame, regions: &Regions) -> Hit {
-    if let Some(buttons) = frame.buttons.filter(|buttons| buttons.contains(at)) {
-        return button_at(buttons, at.0);
+    if let Some(buttons) = regions.buttons {
+        if let Some(index) = buttons.iter().position(|button| button.contains(at)) {
+            return Hit::Button(CaptionButton::ALL[index]);
+        }
     }
     if !frame.maximized && at.1 < frame.resize {
         return if at.0 < frame.resize {
@@ -152,99 +141,101 @@ pub fn classify(at: (i32, i32), frame: &Frame, regions: &Regions) -> Hit {
     Hit::Caption
 }
 
-/// Which of the three buttons `x` is over: the band the system reports is
-/// all three side by side, the same width each.
-fn button_at(buttons: Px, x: i32) -> Hit {
-    let width = buttons.width().max(1);
-    match ((x - buttons.left) * 3 / width).clamp(0, 2) {
-        0 => Hit::Minimize,
-        1 => Hit::Maximize,
-        _ => Hit::Close,
-    }
+/// A mouse message the system sends while the pointer is the title bar's,
+/// as far as the caption buttons care: which button, if any, the system
+/// says it is over (the hit test's own answer, handed back).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mouse {
+    /// `WM_NCMOUSEMOVE`.
+    Move(Option<CaptionButton>),
+    /// `WM_NCMOUSELEAVE`: out of the title bar, into the window or away.
+    Leave,
+    /// `WM_NCLBUTTONDOWN`, and its double click.
+    Down(Option<CaptionButton>),
+    /// `WM_NCLBUTTONUP`.
+    Up(Option<CaptionButton>),
 }
 
-/// Where the caption buttons are when the system will not say: three
-/// buttons of the size the system names, in the band's top right corner.
-pub fn fallback_buttons(width: i32, button: (i32, i32)) -> Px {
-    Px {
-        left: width - button.0 * 3,
-        top: 0,
-        right: width,
-        bottom: button.1,
-    }
+/// What a [`Mouse`] message comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Heard {
+    /// The buttons look different now: the window is to be drawn again.
+    pub changed: bool,
+    /// Letting go on the button that was pressed: its command.
+    pub click: Option<CaptionButton>,
+    /// The message was the buttons' and goes no further. A press or a
+    /// release on a button is: the system's own handling of one would track
+    /// buttons of its own metrics, which are not the ones drawn. Anything
+    /// else goes on to the system, which moves, maximizes and opens the
+    /// system menu for the title bar, and brings Snap Layouts up over
+    /// Maximize.
+    pub ours: bool,
 }
 
-/// The band the layout is given, from where the caption buttons are and how
-/// wide the client area is, at `scale` physical pixels to a point: at least
-/// as tall as the buttons reach, and everything from their left edge to the
-/// window's right kept clear.
-pub fn band_of(buttons: Px, width: i32, scale: f64) -> TitleBand {
-    let points = |pixels: i32| (f64::from(pixels.max(0)) / scale) as f32;
-    TitleBand {
-        height: points(buttons.bottom),
-        left_inset: 0.0,
-        right_inset: points(width - buttons.left),
+/// Follow `mouse` on the buttons: hovered while over, pressed on a press,
+/// clicked on a release over the one pressed. Leaving the title bar lets go
+/// of the press as well, since the release will land in the window, where
+/// these messages do not go.
+pub fn track(pointer: &mut CaptionPointer, mouse: Mouse) -> Heard {
+    let before = *pointer;
+    let mut heard = Heard::default();
+    match mouse {
+        Mouse::Move(over) => pointer.hover = over,
+        Mouse::Leave => *pointer = CaptionPointer::default(),
+        Mouse::Down(on) => {
+            pointer.hover = on;
+            pointer.pressed = on;
+            heard.ours = on.is_some();
+        }
+        Mouse::Up(on) => {
+            heard.click = on.filter(|button| before.pressed == Some(*button));
+            pointer.hover = on;
+            pointer.pressed = None;
+            heard.ours = on.is_some();
+        }
     }
+    heard.changed = *pointer != before;
+    heard
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Windows 11 at 100 %: a 1400 px wide client area, the three buttons
-    /// 46 × 32 each in its top right corner, an 8 px resize edge.
+    /// A 1400 px wide client area at 100 %, with an 8 px resize edge.
     fn frame() -> Frame {
         Frame {
             width: 1400,
             resize: 8,
             maximized: false,
-            buttons: Some(Px {
-                left: 1400 - 138,
-                top: 0,
-                right: 1400,
-                bottom: 32,
-            }),
         }
     }
 
     /// One tab: the band is the top row's block, 46 px, with ☰, two crumbs
-    /// and the counter on it.
+    /// and the counter on it, and the three buttons, 46 px each, at its
+    /// right end.
     fn regions() -> Regions {
+        let px = |left, top, right, bottom| Px {
+            left,
+            top,
+            right,
+            bottom,
+        };
         Regions {
-            band: Px {
-                left: 0,
-                top: 0,
-                right: 1400,
-                bottom: 46,
-            },
+            band: px(0, 0, 1400, 46),
+            buttons: Some([
+                px(1262, 0, 1308, 46),
+                px(1308, 0, 1354, 46),
+                px(1354, 0, 1400, 46),
+            ]),
             controls: vec![
                 // ☰
-                Px {
-                    left: 11,
-                    top: 11,
-                    right: 43,
-                    bottom: 43,
-                },
+                px(11, 11, 43, 43),
                 // Two crumbs
-                Px {
-                    left: 49,
-                    top: 11,
-                    right: 120,
-                    bottom: 43,
-                },
-                Px {
-                    left: 133,
-                    top: 11,
-                    right: 210,
-                    bottom: 43,
-                },
+                px(49, 11, 120, 43),
+                px(133, 11, 210, 43),
                 // The counter
-                Px {
-                    left: 1180,
-                    top: 8,
-                    right: 1238,
-                    bottom: 46,
-                },
+                px(1180, 8, 1238, 46),
             ],
         }
     }
@@ -257,38 +248,42 @@ mod tests {
         assert_eq!(at(60, 30), Hit::Client, "a crumb");
         assert_eq!(at(1200, 20), Hit::Client, "the counter");
         // Between the crumbs, between the crumbs and the counter, in the
-        // gap above the row and beside it, and under the buttons.
+        // gap above the row, beside it, and between the row and the buttons.
         assert_eq!(at(125, 30), Hit::Caption);
         assert_eq!(at(600, 30), Hit::Caption);
         assert_eq!(at(600, 9), Hit::Caption);
         assert_eq!(at(4, 30), Hit::Caption);
-        assert_eq!(at(1300, 40), Hit::Caption);
+        assert_eq!(at(1250, 30), Hit::Caption);
         // Below the band everything is the window's, controls or not.
         assert_eq!(at(600, 46), Hit::Client);
         assert_eq!(at(1300, 400), Hit::Client);
     }
 
-    /// Each third of the buttons' band is its own button, and the buttons
-    /// win over the resize edge that runs under them: they are what is
-    /// drawn there.
+    /// Each button answers over the whole of its rect, the band's full
+    /// depth, and the buttons win over the resize edge that runs under
+    /// them: they are what is drawn there.
     #[test]
     fn the_caption_buttons_answer_where_they_are_drawn() {
         let (frame, regions) = (frame(), regions());
         let at = |x, y| classify((x, y), &frame, &regions);
-        assert_eq!(at(1262, 16), Hit::Minimize);
-        assert_eq!(at(1307, 16), Hit::Minimize);
-        assert_eq!(at(1308, 16), Hit::Maximize);
-        assert_eq!(at(1353, 16), Hit::Maximize);
-        assert_eq!(at(1354, 16), Hit::Close);
-        assert_eq!(at(1399, 0), Hit::Close, "the corner, over the edge");
+        assert_eq!(at(1262, 16), Hit::Button(CaptionButton::Minimize));
+        assert_eq!(at(1307, 45), Hit::Button(CaptionButton::Minimize));
+        assert_eq!(at(1308, 16), Hit::Button(CaptionButton::Maximize));
+        assert_eq!(at(1353, 16), Hit::Button(CaptionButton::Maximize));
+        assert_eq!(at(1354, 16), Hit::Button(CaptionButton::Close));
+        assert_eq!(
+            at(1399, 0),
+            Hit::Button(CaptionButton::Close),
+            "the corner, over the edge"
+        );
         assert_eq!(at(1261, 16), Hit::Caption, "just left of them");
-        assert_eq!(at(1330, 32), Hit::Caption, "just under them");
-        // No buttons reported: the band is the title bar there too.
-        let bare = Frame {
+        assert_eq!(at(1330, 46), Hit::Client, "just under them");
+        // No buttons: the band is the title bar there too.
+        let bare = Regions {
             buttons: None,
-            ..frame
+            ..regions
         };
-        assert_eq!(classify((1330, 16), &bare, &regions), Hit::Caption);
+        assert_eq!(classify((1330, 16), &frame, &bare), Hit::Caption);
     }
 
     #[test]
@@ -300,29 +295,32 @@ mod tests {
         assert_eq!(at(600, 8), Hit::Caption);
         assert_eq!(at(3, 3), Hit::TopLeft);
         assert_eq!(at(20, 3), Hit::Top, "over ☰'s column, but above it");
-        let bare = Frame {
+        let bare = Regions {
             buttons: None,
-            ..frame
+            ..regions.clone()
         };
-        assert_eq!(classify((1396, 3), &bare, &regions), Hit::TopRight);
+        assert_eq!(classify((1396, 3), &frame, &bare), Hit::TopRight);
         let maximized = Frame {
             maximized: true,
             ..frame
         };
         assert_eq!(classify((600, 0), &maximized, &regions), Hit::Caption);
         assert_eq!(classify((3, 3), &maximized, &regions), Hit::Caption);
-        assert_eq!(classify((1330, 3), &maximized, &regions), Hit::Maximize);
+        assert_eq!(
+            classify((1330, 3), &maximized, &regions),
+            Hit::Button(CaptionButton::Maximize)
+        );
     }
 
-    /// Before the window has laid anything out there is no band, and every
-    /// point but the buttons and the edge is the window's.
+    /// Before the window has laid anything out there is no band and there
+    /// are no buttons, and every point but the edge is the window's.
     #[test]
     fn with_no_band_reported_the_window_is_all_client() {
         let frame = frame();
         let at = |x, y| classify((x, y), &frame, &Regions::NONE);
         assert_eq!(at(600, 30), Hit::Client);
+        assert_eq!(at(1330, 16), Hit::Client);
         assert_eq!(at(600, 3), Hit::Top);
-        assert_eq!(at(1330, 16), Hit::Maximize);
     }
 
     /// Two tabs: the band is the strip's block, and the top row below it is
@@ -330,33 +328,24 @@ mod tests {
     #[test]
     fn with_a_strip_the_row_below_it_is_all_client() {
         let frame = frame();
+        let px = |left, top, right, bottom| Px {
+            left,
+            top,
+            right,
+            bottom,
+        };
         let regions = Regions {
-            band: Px {
-                left: 0,
-                top: 0,
-                right: 1400,
-                bottom: 38,
-            },
+            band: px(0, 0, 1400, 38),
+            buttons: Some([
+                px(1262, 0, 1308, 38),
+                px(1308, 0, 1354, 38),
+                px(1354, 0, 1400, 38),
+            ]),
             controls: vec![
-                Px {
-                    left: 8,
-                    top: 8,
-                    right: 120,
-                    bottom: 38,
-                },
-                Px {
-                    left: 128,
-                    top: 8,
-                    right: 250,
-                    bottom: 38,
-                },
+                px(8, 8, 120, 38),
+                px(128, 8, 250, 38),
                 // The `+`
-                Px {
-                    left: 258,
-                    top: 8,
-                    right: 288,
-                    bottom: 38,
-                },
+                px(258, 8, 288, 38),
             ],
         };
         let at = |x, y| classify((x, y), &frame, &regions);
@@ -365,6 +354,7 @@ mod tests {
         assert_eq!(at(124, 20), Hit::Caption, "between two chips");
         assert_eq!(at(700, 20), Hit::Caption, "after the +");
         assert_eq!(at(700, 50), Hit::Client, "the top row's empty middle");
+        assert_eq!(at(1330, 50), Hit::Client, "under the buttons");
     }
 
     #[test]
@@ -390,62 +380,64 @@ mod tests {
         );
     }
 
-    /// The layout keeps clear everything from the buttons' left edge to the
-    /// window's right, in points, and the band reaches at least as far down
-    /// as they do.
+    const MIN: Option<CaptionButton> = Some(CaptionButton::Minimize);
+    const MAX: Option<CaptionButton> = Some(CaptionButton::Maximize);
+    const CLOSE: Option<CaptionButton> = Some(CaptionButton::Close);
+
+    /// Over a button it is lit; off it, not; a move that changes nothing
+    /// asks for no frame. Moves are never the buttons' alone: the system
+    /// brings Snap Layouts up from them.
     #[test]
-    fn the_band_keeps_the_buttons_clear() {
-        let band = band_of(frame().buttons.expect("buttons"), 1400, 1.0);
-        assert_eq!(band.right_inset, 138.0);
-        assert_eq!(band.left_inset, 0.0);
-        assert_eq!(band.height, 32.0);
-        // At 150 % the same buttons are 1.5 times the pixels and the same
-        // points.
-        let scaled = Px {
-            left: 2100 - 207,
-            top: 0,
-            right: 2100,
-            bottom: 48,
-        };
-        let band = band_of(scaled, 2100, 1.5);
-        assert_eq!(band.right_inset, 138.0);
-        assert_eq!(band.height, 32.0);
+    fn the_pointer_lights_the_button_it_is_over() {
+        let mut pointer = CaptionPointer::default();
+        let heard = track(&mut pointer, Mouse::Move(MAX));
+        assert_eq!(pointer.hover, MAX);
+        assert!(heard.changed && !heard.ours && heard.click.is_none());
+        assert!(!track(&mut pointer, Mouse::Move(MAX)).changed);
+        assert!(track(&mut pointer, Mouse::Move(CLOSE)).changed);
+        track(&mut pointer, Mouse::Move(None));
+        assert_eq!(pointer, CaptionPointer::default());
+        track(&mut pointer, Mouse::Move(MIN));
+        let heard = track(&mut pointer, Mouse::Leave);
+        assert!(heard.changed && !heard.ours);
+        assert_eq!(pointer, CaptionPointer::default());
     }
 
+    /// A press and a release on one button is its click, and both are the
+    /// buttons' own; a release on another button, or after the pointer
+    /// left the title bar, is no click.
     #[test]
-    fn with_no_word_from_the_system_the_buttons_are_three_of_its_size_in_the_corner() {
-        let buttons = fallback_buttons(1400, (46, 32));
-        assert_eq!(
-            buttons,
-            Px {
-                left: 1262,
-                top: 0,
-                right: 1400,
-                bottom: 32,
-            }
-        );
-        assert_eq!(band_of(buttons, 1400, 1.0).right_inset, 138.0);
+    fn a_click_is_a_press_and_a_release_on_the_same_button() {
+        let mut pointer = CaptionPointer::default();
+        let down = track(&mut pointer, Mouse::Down(CLOSE));
+        assert!(down.ours && down.changed && down.click.is_none());
+        assert_eq!(pointer.pressed, CLOSE);
+        let up = track(&mut pointer, Mouse::Up(CLOSE));
+        assert_eq!(up.click, CLOSE);
+        assert!(up.ours);
+        assert_eq!(pointer.pressed, None);
+
+        track(&mut pointer, Mouse::Down(CLOSE));
+        track(&mut pointer, Mouse::Move(MAX));
+        assert_eq!(pointer.pressed, CLOSE, "held while it crosses");
+        assert_eq!(track(&mut pointer, Mouse::Up(MAX)).click, None);
+
+        track(&mut pointer, Mouse::Down(MIN));
+        track(&mut pointer, Mouse::Leave);
+        assert_eq!(pointer.pressed, None);
+        assert_eq!(track(&mut pointer, Mouse::Up(MIN)).click, None);
     }
 
-    /// The system reports the buttons from the window's corner, which is
-    /// outside the client area by the invisible resize border at the side,
-    /// and above it by the frame when maximized.
+    /// A press or a release on the title bar, not a button, is the
+    /// system's: it moves and maximizes the window.
     #[test]
-    fn window_relative_bounds_move_into_the_client_area() {
-        let window = Px {
-            left: 1269,
-            top: 1,
-            right: 1407,
-            bottom: 33,
-        };
-        assert_eq!(
-            window.moved((-7, 0)),
-            Px {
-                left: 1262,
-                top: 1,
-                right: 1400,
-                bottom: 33,
-            }
-        );
+    fn the_title_bars_own_presses_go_on_to_the_system() {
+        let mut pointer = CaptionPointer::default();
+        assert!(!track(&mut pointer, Mouse::Down(None)).ours);
+        assert!(!track(&mut pointer, Mouse::Up(None)).ours);
+        // …and a release there lets go of a button pressed and left.
+        track(&mut pointer, Mouse::Down(MAX));
+        track(&mut pointer, Mouse::Up(None));
+        assert_eq!(pointer.pressed, None);
     }
 }

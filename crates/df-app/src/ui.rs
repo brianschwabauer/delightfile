@@ -652,19 +652,56 @@ impl Split {
 ///
 /// With a band, the chrome's first row goes up into it — the top row with
 /// one tab, the strip with more, the top row staying below it then, as in
-/// Explorer — and stops short of what the system keeps at each end: the
-/// caption buttons on Windows.
+/// Explorer — and stops short of what is kept at each end: on Windows, the
+/// three caption buttons, which the window draws there itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TitleBand {
-    /// The least depth the band may have: how far down the system's own
-    /// buttons reach. A row shallower than they are is centred in the band
-    /// rather than leaving a button hanging below it.
+    /// The least depth the band may have: how far down buttons the system
+    /// draws in it reach. A row shallower than they are is centred in the
+    /// band rather than leaving a button hanging below it. Buttons the
+    /// window draws (`buttons`) are the band's depth, whatever it is, and
+    /// ask for none.
     pub height: f32,
-    /// What the system keeps for itself at each end, from the window's
-    /// edge: the chrome's row keeps a [`GAP`] from it, as from the window's
-    /// edge where nothing is kept.
+    /// What is kept at each end, from the window's edge — the system's
+    /// buttons, or the window's own: the chrome's row keeps a [`GAP`] from
+    /// it, as from the window's edge where nothing is kept.
     pub left_inset: f32,
     pub right_inset: f32,
+    /// The width of each of the three caption buttons — minimize, maximize,
+    /// close — when the window draws them itself, at the band's right end
+    /// and its full depth ([`Layout::caption`]); `0` when it draws none.
+    /// `right_inset` is what keeps them clear.
+    pub buttons: f32,
+}
+
+/// One of the three caption buttons a window draws itself (Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CaptionButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl CaptionButton {
+    /// Left to right, as [`Layout::caption`] holds their rects.
+    pub const ALL: [CaptionButton; 3] = [
+        CaptionButton::Minimize,
+        CaptionButton::Maximize,
+        CaptionButton::Close,
+    ];
+}
+
+/// What the pointer is doing to the caption buttons, as the platform hears
+/// it: over them the pointer is the title bar's, not the window's, so egui
+/// never sees it there (`platform::window::caption_pointer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptionPointer {
+    /// The button the pointer is over.
+    pub hover: Option<CaptionButton>,
+    /// The button the primary button went down on, until it comes up or the
+    /// pointer leaves the title bar. It is drawn pressed while the pointer
+    /// is still over it, and letting go there is a click.
+    pub pressed: Option<CaptionButton>,
 }
 
 /// Where the panes and the chrome go.
@@ -713,6 +750,11 @@ pub struct Layout {
     /// the system's buttons if they reach further. What in it is not one of
     /// the chrome's controls is the title bar.
     pub band: Option<egui::Rect>,
+    /// The caption buttons the window draws itself, minimize, maximize and
+    /// close, left to right: [`TitleBand::buttons`] wide each, the band's
+    /// full depth, at the window's right edge. `None` without a band or where
+    /// the system draws its own.
+    pub caption: Option<[egui::Rect; 3]>,
 }
 
 impl Layout {
@@ -831,6 +873,20 @@ pub fn layout(
             ),
         )
     });
+    // The window's own caption buttons, when it draws them: the band's full
+    // depth, at the window's right edge, one width each.
+    let caption = band.zip(title).and_then(|(band, title)| {
+        (band.buttons > 0.0).then(|| {
+            let right = title.right();
+            let width = band.buttons.min(title.width() / 3.0);
+            [2.0, 1.0, 0.0].map(|after: f32| {
+                egui::Rect::from_min_max(
+                    egui::pos2(right - width * (after + 1.0), title.top()),
+                    egui::pos2(right - width * after, title.bottom()),
+                )
+            })
+        })
+    });
     // Nothing under the band is in it: buttons deeper than the row keep the
     // panes below them too, or a press on a row there would move the window.
     let top = match title {
@@ -899,6 +955,7 @@ pub fn layout(
         collapsed: split.collapsed,
         usable,
         band: title,
+        caption,
     }
 }
 
@@ -2395,6 +2452,7 @@ mod tests {
                     collapsed: [false, false],
                     usable: 1376.0,
                     band: None,
+                    caption: None,
                 },
             ),
             (
@@ -2412,6 +2470,7 @@ mod tests {
                     collapsed: [false, false],
                     usable: 1376.0,
                     band: None,
+                    caption: None,
                 },
             ),
             (
@@ -2429,6 +2488,7 @@ mod tests {
                     collapsed: [false, false],
                     usable: 1376.0,
                     band: None,
+                    caption: None,
                 },
             ),
             (
@@ -2446,6 +2506,7 @@ mod tests {
                     collapsed: [true, false],
                     usable: 1376.0,
                     band: None,
+                    caption: None,
                 },
             ),
             (
@@ -2463,6 +2524,7 @@ mod tests {
                     collapsed: [false, false],
                     usable: 1376.0,
                     band: None,
+                    caption: None,
                 },
             ),
         ];
@@ -2475,13 +2537,54 @@ mod tests {
         }
     }
 
-    /// Windows 11 at 100 %: the three caption buttons, 32 points deep and
-    /// 138 wide, at the band's right end.
+    /// A system's three caption buttons, 32 points deep and 138 wide, at the
+    /// band's right end: the layout keeps them clear and draws none.
     const BAND: TitleBand = TitleBand {
         height: 32.0,
         left_inset: 0.0,
         right_inset: 138.0,
+        buttons: 0.0,
     };
+
+    /// Windows: the window draws the three buttons itself, 46 points each,
+    /// and keeps their width clear.
+    const DRAWN: TitleBand = TitleBand {
+        height: 0.0,
+        left_inset: 0.0,
+        right_inset: 138.0,
+        buttons: 46.0,
+    };
+
+    /// The buttons the window draws are the band's full depth at the
+    /// window's right edge, 46 points each, minimize to close, and the row
+    /// ends a gap before them — the top row's band with one tab, the strip's
+    /// with two. A band whose system draws its own has none.
+    #[test]
+    fn the_windows_own_caption_buttons_fill_the_band_at_its_right_end() {
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(DRAWN));
+        let deep = GAP + TOP_HEIGHT;
+        assert_eq!(
+            l.caption,
+            Some([
+                r(1408.0 - 138.0, 0.0, 1408.0 - 92.0, deep),
+                r(1408.0 - 92.0, 0.0, 1408.0 - 46.0, deep),
+                r(1408.0 - 46.0, 0.0, 1408.0, deep),
+            ])
+        );
+        assert_eq!(l.path.right(), 1408.0 - 138.0 - GAP);
+
+        let l = layout(area(), &Split::at([1, 4, 3]), true, 1, Some(DRAWN));
+        let buttons = l.caption.expect("drawn buttons");
+        assert!(buttons
+            .iter()
+            .all(|button| button.top() == 0.0 && button.bottom() == GAP + CHROME_HEIGHT));
+        assert_eq!(buttons[0].left(), l.strip.expect("a strip").right() + GAP);
+
+        assert_eq!(
+            layout(area(), &Split::at([1, 4, 3]), false, 1, Some(BAND)).caption,
+            None
+        );
+    }
 
     /// One tab: the top row goes up into the band, at its margin from the
     /// window's top and a gap short of the buttons, and the band is the

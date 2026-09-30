@@ -3,12 +3,10 @@
 //! two, the way Explorer, Terminal and Edge have one.
 //!
 //! **The frame stays the system's.** The window keeps its caption style, so
-//! it keeps its rounded corners, its shadow, its resize edges and its three
-//! caption buttons with Snap Layouts under Maximize; what changes is where
-//! the client area begins. [`adopt`] puts a window procedure in front of
-//! winit's (`SetWindowLongPtrW(GWLP_WNDPROC)`: winit has no hook for these
-//! messages) and asks for the frame to be measured again, and the procedure
-//! answers four messages before winit sees them:
+//! it keeps its rounded corners, its shadow and its resize edges; what
+//! changes is where the client area begins. [`adopt`] puts a window procedure
+//! in front of winit's (`SetWindowLongPtrW(GWLP_WNDPROC)`: winit has no hook
+//! for these messages) and asks for the frame to be measured again:
 //!
 //! - `WM_NCCALCSIZE`: the default frame is computed and then its top given
 //!   back, so the client area runs to the window's top edge — the caption is
@@ -19,62 +17,74 @@
 //!   borders; a point it calls client is then [`caption::classify`]'d — a
 //!   caption button, the resize edge along the top, one of the window's
 //!   controls, or the title bar.
-//! - `WM_DPICHANGED` and `WM_ACTIVATE`: the frame is extended into the client
-//!   area again, by the caption's depth at the new DPI
-//!   (`DwmExtendFrameIntoClientArea`), which is what has DWM go on drawing
-//!   the caption buttons over the band.
 //!
-//! Every message goes to `DwmDefWindowProc` first, which answers for the
-//! caption buttons DWM draws — their hover, their press, and `HTMAXBUTTON`
-//! under Maximize, which is what brings up Snap Layouts — and what it does
-//! not answer goes on to winit's procedure. At `WM_NCDESTROY` winit's
-//! procedure is put back before the message goes on, so the window leaves as
-//! it came.
+//! The frame is extended one pixel into the client area
+//! (`DwmExtendFrameIntoClientArea`), the least that keeps DWM treating the
+//! window as one with a frame of its own.
 //!
-//! **The band.** The layout asks [`title_band`] how tall the band must be
-//! and what to keep clear at its ends — the caption buttons, as DWM reports
-//! them (`DWMWA_CAPTION_BUTTON_BOUNDS`), or three of the system's caption
-//! button size when it does not — and after every layout says where the band
-//! is and which rects in it are its controls ([`title_regions`]); the hit
-//! test reads what it said last. Both run on the UI thread, which is the
-//! thread that gets the messages; the lock is held for a copy and never
+//! **The caption buttons are the window's** (Brian's call, 2026-09-30, as
+//! Terminal, Chrome and Zed draw theirs). DWM draws the extended frame behind
+//! the client area, and the window's DX12 surface is opaque, so buttons of
+//! DWM's would be covered; the window draws three at the band's right end
+//! instead ([`crate::chrome::caption_buttons`]), and the hit test calls them
+//! `HTMINBUTTON`, `HTMAXBUTTON` and `HTCLOSE`, which is what brings Snap
+//! Layouts up under Maximize. Over them the pointer is the title bar's, so
+//! what it does comes as the non-client mouse messages, which
+//! [`caption::track`] reads: `WM_NCMOUSEMOVE` lights a button (with
+//! `TrackMouseEvent(TME_NONCLIENT)`, so `WM_NCMOUSELEAVE` puts it out),
+//! `WM_NCLBUTTONDOWN` presses one and `WM_NCLBUTTONUP` on the same one is its
+//! click, posted as the `WM_SYSCOMMAND` the system's own button would send —
+//! `SC_MINIMIZE`, `SC_MAXIMIZE` or `SC_RESTORE`, `SC_CLOSE`. A press and a
+//! release on a button go no further: the default procedure would track
+//! buttons of the system's metrics, which are not the ones drawn. Moves go
+//! on, so the system sees the pointer over Maximize. A change asks the
+//! window for a frame (`RedrawWindow(RDW_INTERNALPAINT)`, as winit's
+//! `request_redraw` does), and the frame reads [`caption_pointer`].
+//!
+//! **The band.** [`title_band`] tells the layout to keep the three buttons'
+//! width clear and draw them there, and after every layout the window says
+//! where the band, the buttons and its own controls are ([`title_regions`]);
+//! the hit test reads what it said last. Both run on the UI thread, which is
+//! the thread that gets the messages; the lock is held for a copy and never
 //! across a call into the system.
 //!
-//! **Light and dark.** The caption buttons are drawn on the window's side
-//! only when DWM is told it (`DWMWA_USE_IMMERSIVE_DARK_MODE`); winit's own
-//! theme call sets an undocumented composition attribute and not this one,
-//! so [`set_theme`] sets both.
-//!
-//! A window with no caption — winit's full screen takes it away — is left
-//! alone by every message here, and has no band.
-#![allow(unsafe_code)] // the window procedure subclassed and put back, its messages' pointers read, four DWM calls; each block says why it holds
+//! At `WM_NCDESTROY` winit's procedure is put back before the message goes
+//! on, so the window leaves as it came. A window with no caption — winit's
+//! full screen takes it away — is left alone by every message here, and has
+//! no band.
+#![allow(unsafe_code)] // the window procedure subclassed and put back, its messages' pointers read, a handful of Win32 and DWM calls; each block says why it holds
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
-    DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+use windows_sys::Win32::Graphics::Gdi::{RedrawWindow, ScreenToClient, RDW_INTERNALPAINT};
 use windows_sys::Win32::UI::Controls::MARGINS;
-use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi,
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, GetWindowRect, IsZoomed,
-    SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, HTCAPTION, HTCLIENT,
-    HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, NCCALCSIZE_PARAMS,
-    SM_CXPADDEDBORDER, SM_CXSIZE, SM_CYSIZE, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_DPICHANGED,
-    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WNDPROC, WS_CAPTION,
+    CallWindowProcW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, IsZoomed, PostMessageW,
+    SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HTCAPTION, HTCLIENT, HTCLOSE,
+    HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, NCCALCSIZE_PARAMS, SC_CLOSE,
+    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND, WNDPROC, WS_CAPTION,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Theme, Window};
 
-use crate::platform::caption::{self, Frame, Hit, Px, Regions};
-use crate::ui::TitleBand;
+use crate::platform::caption::{self, Frame, Hit, Mouse, Px, Regions};
+use crate::ui::{CaptionButton, CaptionPointer, TitleBand};
+
+/// Windows 11's caption button width, in logical points: the three the
+/// window draws are this wide each.
+const CAPTION_BUTTON: f32 = 46.0;
 
 /// winit's window procedure, while this one stands in front of it; `0`
 /// before [`adopt`] and after the window is gone.
@@ -84,12 +94,27 @@ static WINITS: AtomicIsize = AtomicIsize::new(0);
 /// (`crate::window`'s essay).
 static ADOPTED: AtomicIsize = AtomicIsize::new(0);
 
-/// What the layout last said about the band, in physical pixels.
-static REGIONS: Mutex<Regions> = Mutex::new(Regions::NONE);
+/// What the layout last said about the band, and what the pointer is doing
+/// to the caption buttons.
+struct State {
+    regions: Regions,
+    pointer: CaptionPointer,
+    /// Whether `WM_NCMOUSELEAVE` has been asked for since the last one came.
+    tracking: bool,
+}
+
+static STATE: Mutex<State> = Mutex::new(State {
+    regions: Regions::NONE,
+    pointer: CaptionPointer {
+        hover: None,
+        pressed: None,
+    },
+    tracking: false,
+});
 
 /// Put this module's window procedure in front of winit's, extend the frame
-/// over the caption and have the frame measured again. Once, right after
-/// the window is made and before anything draws into it.
+/// a pixel and have the frame measured again. Once, right after the window
+/// is made and before anything draws into it.
 pub fn adopt(window: &Window) {
     let Some(hwnd) = hwnd_of(window) else {
         return;
@@ -116,7 +141,17 @@ pub fn adopt(window: &Window) {
             return;
         }
     }
-    extend(hwnd);
+    let margins = MARGINS {
+        cxLeftWidth: 0,
+        cxRightWidth: 0,
+        cyTopHeight: 1,
+        cyBottomHeight: 0,
+    };
+    // SAFETY: the margins are live for the call.
+    let extended = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+    if extended < 0 {
+        log::warn!("titlebar: the frame would not extend ({extended:#x})");
+    }
     // SAFETY: a live window, asked to recompute its frame (the next
     // `WM_NCCALCSIZE` is ours) without moving, sizing or reordering.
     unsafe {
@@ -137,39 +172,55 @@ pub fn adopt(window: &Window) {
     };
 }
 
-/// The band the layout is given: at least as tall as the caption buttons
-/// reach and clear of them at its right end, in logical points. `None`
-/// before [`adopt`], and for a window with no caption.
+/// The band the layout is given: the three caption buttons the window
+/// draws kept clear at its right end, in logical points. `None` before
+/// [`adopt`], and for a window with no caption.
 pub fn title_band(window: &Window) -> Option<TitleBand> {
-    let hwnd = adopted(window)?;
-    let width = client_width(hwnd)?;
-    Some(caption::band_of(
-        buttons(hwnd, width),
-        width,
-        window.scale_factor(),
-    ))
+    adopted(window)?;
+    Some(TitleBand {
+        height: 0.0,
+        left_inset: 0.0,
+        right_inset: CAPTION_BUTTON * 3.0,
+        buttons: CAPTION_BUTTON,
+    })
 }
 
-/// Where the band is and which rects in it are the window's own controls,
-/// in logical points: what the hit test answers the next point with.
-pub fn title_regions(window: &Window, band: egui::Rect, controls: &[egui::Rect]) {
+/// Where the band, the caption buttons and the window's own controls in the
+/// band are, in logical points: what the hit test answers the next point
+/// with.
+pub fn title_regions(
+    window: &Window,
+    band: egui::Rect,
+    buttons: Option<[egui::Rect; 3]>,
+    controls: &[egui::Rect],
+) {
     if adopted(window).is_none() {
         return;
     }
     let scale = window.scale_factor();
     let regions = Regions {
         band: Px::around(band, scale),
+        buttons: buttons.map(|buttons| buttons.map(|button| Px::around(button, scale))),
         controls: controls
             .iter()
             .map(|control| Px::around(*control, scale))
             .collect(),
     };
-    if let Ok(mut held) = REGIONS.lock() {
-        *held = regions;
+    if let Ok(mut state) = STATE.lock() {
+        state.regions = regions;
     }
 }
 
-/// The window's side, for winit and for the caption buttons DWM draws.
+/// What the pointer is doing to the caption buttons, for the frame that
+/// draws them.
+pub fn caption_pointer(window: &Window) -> CaptionPointer {
+    if adopted(window).is_none() {
+        return CaptionPointer::default();
+    }
+    STATE.lock().map(|state| state.pointer).unwrap_or_default()
+}
+
+/// The window's side, for winit and for DWM's frame around it.
 pub fn set_theme(window: &Window, theme: Theme) {
     window.set_theme(Some(theme));
     let Some(hwnd) = hwnd_of(window) else {
@@ -219,11 +270,6 @@ unsafe extern "system" fn procedure(
     if !captioned(hwnd) {
         return forward();
     }
-    let mut answered: LRESULT = 0;
-    // SAFETY: the message as it came, and a live LRESULT for the answer.
-    if unsafe { DwmDefWindowProc(hwnd, message, wparam, lparam, &mut answered) } != 0 {
-        return answered;
-    }
     match message {
         WM_NCCALCSIZE if wparam != 0 => {
             let params = lparam as *mut NCCALCSIZE_PARAMS;
@@ -248,12 +294,102 @@ unsafe extern "system" fn procedure(
             }
             hit_test(hwnd, lparam).unwrap_or(answer)
         }
-        WM_DPICHANGED | WM_ACTIVATE => {
-            let answer = forward();
-            extend(hwnd);
-            answer
+        WM_NCMOUSEMOVE => {
+            let over = button_of(wparam);
+            heard(hwnd, Mouse::Move(over));
+            if over.is_some() {
+                track_leave(hwnd);
+            }
+            forward()
+        }
+        WM_NCMOUSELEAVE => {
+            if let Ok(mut state) = STATE.lock() {
+                state.tracking = false;
+            }
+            heard(hwnd, Mouse::Leave);
+            forward()
+        }
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+            if heard(hwnd, Mouse::Down(button_of(wparam))) {
+                0
+            } else {
+                forward()
+            }
+        }
+        WM_NCLBUTTONUP => {
+            if heard(hwnd, Mouse::Up(button_of(wparam))) {
+                0
+            } else {
+                forward()
+            }
         }
         _ => forward(),
+    }
+}
+
+/// Follow a non-client mouse message on the caption buttons: a frame when
+/// they look different, the command when one is clicked. Whether the message
+/// was theirs alone.
+fn heard(hwnd: HWND, mouse: Mouse) -> bool {
+    let Some(heard) = STATE
+        .lock()
+        .ok()
+        .map(|mut state| caption::track(&mut state.pointer, mouse))
+    else {
+        return false;
+    };
+    if heard.changed {
+        // SAFETY: a live window asked for a paint message, which winit turns
+        // into the frame that draws the buttons as they are now.
+        unsafe { RedrawWindow(hwnd, std::ptr::null(), 0, RDW_INTERNALPAINT) };
+    }
+    if let Some(button) = heard.click {
+        let command = match button {
+            CaptionButton::Minimize => SC_MINIMIZE,
+            CaptionButton::Maximize if zoomed(hwnd) => SC_RESTORE,
+            CaptionButton::Maximize => SC_MAXIMIZE,
+            CaptionButton::Close => SC_CLOSE,
+        };
+        // SAFETY: a message posted to a live window, handled when this one
+        // has returned; the default procedure carries the command out.
+        unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
+    }
+    heard.ours
+}
+
+/// Ask for `WM_NCMOUSELEAVE`, once per stay over the title bar: without it
+/// the system does not say when the pointer has left a button for the
+/// window or for somewhere else.
+fn track_leave(hwnd: HWND) {
+    let asked = STATE
+        .lock()
+        .map(|mut state| std::mem::replace(&mut state.tracking, true))
+        .unwrap_or(true);
+    if asked {
+        return;
+    }
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE | TME_NONCLIENT,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    // SAFETY: one TRACKMOUSEEVENT, sized and live for the call, naming a
+    // live window.
+    if unsafe { TrackMouseEvent(&mut track) } == 0 {
+        if let Ok(mut state) = STATE.lock() {
+            state.tracking = false;
+        }
+    }
+}
+
+/// The caption button a hit-test code names.
+fn button_of(code: WPARAM) -> Option<CaptionButton> {
+    match code as u32 {
+        HTMINBUTTON => Some(CaptionButton::Minimize),
+        HTMAXBUTTON => Some(CaptionButton::Maximize),
+        HTCLOSE => Some(CaptionButton::Close),
+        _ => None,
     }
 }
 
@@ -268,16 +404,14 @@ fn hit_test(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
     if unsafe { ScreenToClient(hwnd, &mut at) } == 0 {
         return None;
     }
-    let width = client_width(hwnd)?;
     let frame = Frame {
-        width,
+        width: client_width(hwnd)?,
         resize: resize_edge(hwnd),
         maximized: zoomed(hwnd),
-        buttons: Some(buttons(hwnd, width)),
     };
     let hit = {
-        let regions = REGIONS.lock().ok()?;
-        caption::classify((at.x, at.y), &frame, &regions)
+        let state = STATE.lock().ok()?;
+        caption::classify((at.x, at.y), &frame, &state.regions)
     };
     let code = match hit {
         Hit::Client => HTCLIENT,
@@ -285,94 +419,11 @@ fn hit_test(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
         Hit::Top => HTTOP,
         Hit::TopLeft => HTTOPLEFT,
         Hit::TopRight => HTTOPRIGHT,
-        Hit::Minimize => HTMINBUTTON,
-        Hit::Maximize => HTMAXBUTTON,
-        Hit::Close => HTCLOSE,
+        Hit::Button(CaptionButton::Minimize) => HTMINBUTTON,
+        Hit::Button(CaptionButton::Maximize) => HTMAXBUTTON,
+        Hit::Button(CaptionButton::Close) => HTCLOSE,
     };
     Some(code as LRESULT)
-}
-
-/// Extend the frame into the client area by the caption's depth at the
-/// window's DPI: the band DWM goes on drawing the caption buttons in.
-fn extend(hwnd: HWND) {
-    // SAFETY: a live window's style and DPI, and one RECT this function
-    // owns, grown by the frame a window of that style has at that DPI.
-    let top = unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        let extended = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if AdjustWindowRectExForDpi(&mut frame, style, 0, extended, GetDpiForWindow(hwnd)) == 0 {
-            return;
-        }
-        -frame.top
-    };
-    let margins = MARGINS {
-        cxLeftWidth: 0,
-        cxRightWidth: 0,
-        cyTopHeight: top,
-        cyBottomHeight: 0,
-    };
-    // SAFETY: the margins are live for the call.
-    let result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-    if result < 0 {
-        log::warn!("titlebar: the frame would not extend ({result:#x})");
-    }
-}
-
-/// Where the caption buttons are, in client pixels: DWM's word for it, or
-/// three of the system's caption button size in the top right corner.
-fn buttons(hwnd: HWND, width: i32) -> Px {
-    reported_buttons(hwnd).unwrap_or_else(|| {
-        // SAFETY: two metrics at the window's DPI.
-        let size = unsafe {
-            let dpi = GetDpiForWindow(hwnd);
-            (
-                GetSystemMetricsForDpi(SM_CXSIZE, dpi),
-                GetSystemMetricsForDpi(SM_CYSIZE, dpi),
-            )
-        };
-        caption::fallback_buttons(width, size)
-    })
-}
-
-/// DWM's caption button bounds, which are measured from the window's
-/// corner, moved into the client area.
-fn reported_buttons(hwnd: HWND) -> Option<Px> {
-    let mut bounds = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let mut window = bounds;
-    let mut origin = POINT { x: 0, y: 0 };
-    // SAFETY: each call writes one RECT or POINT this function owns, live
-    // for its length.
-    let read = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CAPTION_BUTTON_BOUNDS as u32,
-            (&mut bounds as *mut RECT).cast(),
-            std::mem::size_of::<RECT>() as u32,
-        ) >= 0
-            && GetWindowRect(hwnd, &mut window) != 0
-            && ClientToScreen(hwnd, &mut origin) != 0
-    };
-    if !read || bounds.right <= bounds.left || bounds.bottom <= bounds.top {
-        return None;
-    }
-    let bounds = Px {
-        left: bounds.left,
-        top: bounds.top,
-        right: bounds.right,
-        bottom: bounds.bottom,
-    };
-    Some(bounds.moved((window.left - origin.x, window.top - origin.y)))
 }
 
 /// How deep the resize edge is: the sizing frame and its padding at the
