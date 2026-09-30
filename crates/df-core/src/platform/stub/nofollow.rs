@@ -1,7 +1,6 @@
-//! No way to find a path without following a link: stands in on Windows,
-//! where whether permissions editing exists at all is an open question
-//! (`04-windows.md`). macOS walks with the `*at` calls
-//! (`platform/macos/nofollow.rs`).
+//! No way to find a path without following a link: stands in on Windows for
+//! good, where permissions editing does not exist (`04-windows.md` Decisions
+//! log). macOS walks with the `*at` calls (`platform/macos/nofollow.rs`).
 //!
 //! [`ready`] refuses, and every change and undo in [`crate::ops::mode`] asks it
 //! first, so the permissions change reports "Permissions is not available on

@@ -672,6 +672,14 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   is compiled for macOS alone. Reason: Windows' item is a real one whose
   location is unknown rather than a stand-in, and a stub module Windows no
   longer re-exports would be dead code there.
+- (df-core) 2026-09-29 — Permissions editing (the `C` card, `ops::mode`) does
+  not exist on Windows; decided for Brian, who delegated the open question
+  that asked it. Windows has one permission bit, read-only, which W4.29 shows
+  as the spot panel's chip through `platform::fs::apply_mode`, and ACLs the
+  nine-bit grid cannot show. So `platform::nofollow` stays the stub there:
+  `ready()` refuses with `Unsupported("Permissions")` and the chmod walk is
+  never reached. How df-app presents the absence (the command's refusal, the
+  menu) is the df-app branch's.
 
 ## Open questions
 
@@ -679,13 +687,6 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
-- Permissions editing on Windows (S1.19): does the `C` card exist there at all?
-  Windows has one permission bit, read-only (W4.29 maps the spot panel to a
-  Read-only chip through `platform::fs::apply_mode`), and ACLs the nine-bit grid
-  cannot show. Either `ops::mode` is offered on Windows reduced to read-only,
-  with a walk that opens each component with `FILE_FLAG_OPEN_REPARSE_POINT`, or
-  the card and `Command::Permissions` are absent there. Until decided,
-  `platform::nofollow` on Windows is the stub and every change refuses.
 - (df-app) W4.8: "Empty trash" on Windows. The confirm card lists the trash
   view's items, and there is no view: (a) the command opens the Recycle Bin in
   Explorer, where emptying it is one button, and no card; (b) a card that
