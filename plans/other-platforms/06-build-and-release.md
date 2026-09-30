@@ -13,8 +13,10 @@ something worth shipping.
 When this document was written there was no `.github/` directory, no CI, and no
 release process: Brian builds with `cargo build --release` and `build/install.sh`
 (see `appendix-inventory-df-app.md` §5 for what that script does). Since 2026-09-29
-`.github/workflows/ci.yml` holds the §1 matrix. It has not run yet, because nothing
-has been pushed, so every task it covers is at most `[>]`.
+`.github/workflows/ci.yml` holds the §1 matrix, green on all three targets on
+`main` since run 36669749789 (39c4d51). Since 2026-09-30
+`.github/workflows/release.yml` holds §4, and `build/<os>/` the §3 packaging; no
+release has been tagged yet.
 
 ## Decisions already made
 
@@ -44,7 +46,7 @@ has been pushed, so every task it covers is at most `[>]`.
 
 ## 1. CI matrix (do with Phase 1)
 
-- [>] **B6.1** Create `.github/workflows/ci.yml` triggered on `push` to `main` and on
+- [x] **B6.1** Create `.github/workflows/ci.yml` triggered on `push` to `main` and on
       `pull_request`. Jobs: `linux`, `macos`, `windows`. Each job: checkout, toolchain,
       native deps (§2), `cargo build --workspace`, then tests: on Linux `cargo test
       --workspace`; on macOS and Windows `cargo test -p df-core -p df-app` only,
@@ -66,7 +68,9 @@ has been pushed, so every task it covers is at most `[>]`.
       gets (B6.3's, B6.4's and B6.7's done-when). The linux job's cargo steps run as
       an unprivileged `builder` user, because the container's root ignores
       permission bits (Decisions log).
-- [>] **B6.2** Linux job runs in `container: archlinux:latest` with
+      — done 9afe895, verified on the runner (2026-09-30 note): the linux job is
+      green on `main` in run 36669749789 (39c4d51), with the macOS and Windows jobs.
+- [x] **B6.2** Linux job runs in `container: archlinux:latest` with
       `pacman -Syu --noconfirm rust ffmpeg pkgconf clang git`. Cache
       `~/.cargo/registry`, `~/.cargo/git`, `target/` keyed on `Cargo.lock` and the
       job name.
@@ -77,23 +81,34 @@ has been pushed, so every task it covers is at most `[>]`.
       because Arch's `rust` rolls (Decisions log). `~` here is the build user's home,
       so the cached cargo directories are `/home/builder/.cargo/{registry,git}`.
       Neither the cold time on a GitHub runner nor the warm one is known yet.
-- [>] **B6.3** macOS job on `macos-latest` (verify it is arm64 with `uname -m` in the
+      — done 9afe895, verified on the runner (2026-09-30 note): cold, run
+      36647706325's linux job missed the cache and passed in 14 min 57 s; warm, run
+      36669749789's restored it and passed in 7 min 10 s.
+- [x] **B6.3** macOS job on `macos-latest` (verify it is arm64 with `uname -m` in the
       log). Toolchain via `dtolnay/rust-toolchain@stable`. Native deps per §2.2.
       Done when: `cargo build -p df-core` and `cargo test -p df-core` pass on the
       runner. (df-app follows once Phase 1 stubs exist.) — written 2026-09-29,
       unverified until the first push. `uname -m` is logged and the step fails if it
       is not `arm64`; the action is pinned by commit with `toolchain: stable`.
-- [>] **B6.4** Windows job on `windows-latest`, MSVC toolchain. Native deps per
+      — done 9afe895, verified on the runner (2026-09-30 note): run 36669749789's
+      macOS job, arm64, builds and tests df-core and the rest of B6.1.
+- [x] **B6.4** Windows job on `windows-latest`, MSVC toolchain. Native deps per
       §2.3. Same done-when as B6.3. — written 2026-09-29, unverified until the first
       push. Toolchain `stable-x86_64-pc-windows-msvc`; `core.autocrlf false` before
-      checkout.
-- [ ] **B6.5** Remove `continue-on-error` from the macOS and Windows jobs. This is the
+      checkout. — done 9afe895, verified on the runner (2026-09-30 note): run
+      36669749789's Windows job builds and tests df-core and the rest of B6.1.
+- [x] **B6.5** Remove `continue-on-error` from the macOS and Windows jobs. This is the
       last task of Phase 1 (`01-platform-seam.md` S1.40 cross-references it).
       Done when: all three jobs are required and green on `main`.
-- [>] **B6.6** Add `cargo fmt --check` to the linux job only. Done when: green.
+      — done 0e52895, verified on the runner: CI run 36729161540 on `port/release`
+      has the three jobs green with neither allowed to fail. Making them required
+      checks on `main` is a branch-protection setting only Brian can make
+      (Decisions log, 2026-09-30).
+- [x] **B6.6** Add `cargo fmt --check` to the linux job only. Done when: green.
       — written 2026-09-29, passes in a local archlinux container, unverified on
       GitHub until the first push. It is the first cargo step in the job, straight
-      after the ownership hand-over.
+      after the ownership hand-over. — done 9afe895, verified on the runner
+      (2026-09-30 note): green in run 36669749789.
 
 **Local run of the linux job, 2026-09-29.** Its steps ran in order in Docker's
 `archlinux:latest`, generated from `ci.yml` itself. The checkout was a clone of a git
@@ -167,7 +182,7 @@ System FFmpeg 9 via pacman. pdfium optional at runtime as today. Nothing changes
 
 ### 2.2 macOS
 
-- [>] **B6.7** Establish how to get FFmpeg with **libavcodec major 63** on the macOS
+- [x] **B6.7** Establish how to get FFmpeg with **libavcodec major 63** on the macOS
       runner. Try in order and record the winner in the Decisions log:
       1. `brew install ffmpeg` then `pkg-config --modversion libavcodec`; use it if the
          major is 63.
@@ -181,22 +196,33 @@ System FFmpeg 9 via pacman. pdfium optional at runtime as today. Nothing changes
       The workflow uses option 1 on the evidence in the Decisions log; its FFmpeg
       step prints `FFmpeg: B6.7 option 1, Homebrew ffmpeg <version>, libavcodec
       <version>` and fails, pointing here, when the major is not 63. Switching to
-      option 2 or 3 is below.
-- [ ] **B6.8** pdfium for macOS: download `pdfium-mac-arm64.tgz` from the
+      option 2 or 3 is below. — done 9afe895, verified on the runner (2026-09-30
+      note): option 1; run 36669749789 logs `FFmpeg: B6.7 option 1, Homebrew ffmpeg
+      9.0.1_1, libavcodec 63.1.101` and builds dv-media.
+- [x] **B6.8** pdfium for macOS: download `pdfium-mac-arm64.tgz` from the
       `bblanchon/pdfium-binaries` release matching the `pdfium_7881` ABI feature in
       `crates/df-app/Cargo.toml` (chromium/7881 or the nearest release that keeps the
       ABI; the pdfium-render docs list the pairing). Store the URL and sha256 in
       `build/macos/pdfium.lock` (a two-line text file). The runner fetches and verifies
       it. Done when: the file exists and the fetch step verifies the hash.
       Researched 2026-09-29: the release exists, and its URL and sha256 are in the
-      Decisions log. The lock file is not written yet.
-- [>] **B6.9** Confirm `libclang` is available for `bindgen` on the runner (Xcode's
+      Decisions log. — done 19de00b, verified on the runner:
+      `build/macos/fetch-pdfium.sh` reads the lock, keeps the tarball in
+      `target/pdfium/mac-arm64/` (the release workflow caches it by the lock's
+      hash), checks the sha256 on every run and unpacks `libpdfium.dylib` and
+      pdfium's licenses. The release run's macos job logs `pdfium:
+      chromium/7881/pdfium-mac-arm64.tgz, sha256 52e94ca5…, verified` (run
+      36729167091, dry run).
+- [x] **B6.9** Confirm `libclang` is available for `bindgen` on the runner (Xcode's
       is). Done when: `dv-media` builds without a `LIBCLANG_PATH` override, or the
       override is set in the workflow with a comment. — written 2026-09-29,
       unverified until the first push. The workflow sets no override. The Runner step
       logs `xcode-select -p`, the Xcode whose toolchain clang-sys searches for
       libclang. If bindgen cannot find libclang, add to the FFmpeg step:
       `echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"`.
+      — done 9afe895, verified on the runner (2026-09-30 note): no override;
+      dv-media builds in run 36669749789 against Xcode 26.6's libclang
+      (`/Applications/Xcode_26.6.app/Contents/Developer`).
 
 **Switching B6.7 to a fallback** (researched 2026-09-29). Each replaces the `brew
 install` line of the `FFmpeg (Homebrew)` step in `.github/workflows/ci.yml`. The
@@ -244,7 +270,7 @@ libavcodec-63 check after it stays; change the `option 1` in its echo.
 
 ### 2.3 Windows
 
-- [>] **B6.10** FFmpeg for Windows: download a `ffmpeg-n9.*-win64-gpl-shared` build
+- [x] **B6.10** FFmpeg for Windows: download a `ffmpeg-n9.*-win64-gpl-shared` build
       from `BtbN/FFmpeg-Builds` releases (GPL matches the project licence). Pin the
       exact asset name and sha256 in `build/windows/ffmpeg.lock`. The workflow
       extracts it and sets `FFMPEG_DIR` to the extracted directory, which is what
@@ -254,29 +280,43 @@ libavcodec-63 check after it stays; change the `option 1` in its echo.
       `ci.yml` for now: `build/` was outside that change, so
       `build/windows/ffmpeg.lock` does not exist yet. The step checks the sha256,
       extracts with `7z`, fails unless `version_major.h` says 63, and sets
-      `FFMPEG_DIR`.
-- [>] **B6.11** `bindgen` on Windows needs `LIBCLANG_PATH`. The `windows-latest`
+      `FFMPEG_DIR`. — done b96afb7, verified on the runner: the pin is
+      `build/windows/ffmpeg.lock` now, and `build/windows/fetch-ffmpeg.ps1` does
+      the download, the sha256 check (every run), the unpacking (Windows' own
+      `tar.exe`) and the major-63 check for both workflows. dv-media builds with it
+      in CI run 36729161540 and the release run 36729167091.
+- [x] **B6.11** `bindgen` on Windows needs `LIBCLANG_PATH`. The `windows-latest`
       image has LLVM under `C:\Program Files\LLVM`; set the variable in the workflow.
       Done when: build passes. — written 2026-09-29, unverified until the first
       push. The image's LLVM is 20.1.8, installed by Chocolatey into that directory.
       The step falls back to Visual Studio's bundled LLVM (`VC\Tools\LLVM\x64\bin`
       via `vswhere`), which is what rust-ffmpeg's own Windows CI uses, when
-      `libclang.dll` is not there.
-- [ ] **B6.12** pdfium for Windows: `pdfium-win-x64.tgz` from the same
+      `libclang.dll` is not there. — done 9afe895, verified on the runner
+      (2026-09-30 note): run 36669749789 logs `LIBCLANG_PATH=C:\Program
+      Files\LLVM\bin` and builds.
+- [x] **B6.12** pdfium for Windows: `pdfium-win-x64.tgz` from the same
       `bblanchon/pdfium-binaries` release as B6.8, pinned in
       `build/windows/pdfium.lock`. Done when: fetched and verified in the job.
       Researched 2026-09-29: the release exists, and its URL and sha256 are in the
-      Decisions log. The lock file is not written yet.
-- [>] **B6.13** The `windows` job's smoke test must run with the FFmpeg `bin/`
+      Decisions log. — done 3585685, verified on the runner:
+      `build/windows/fetch-pdfium.ps1` reads the lock, keeps the tarball in
+      `target\pdfium\win-x64\`, checks the sha256 on every run and unpacks
+      `pdfium.dll` and pdfium's licenses; the release run's windows job logs
+      `pdfium: chromium/7881/pdfium-win-x64.tgz, sha256 73cc0de6…, verified` (run
+      36729167091).
+- [x] **B6.13** The `windows` job's smoke test must run with the FFmpeg `bin/`
       directory on `PATH` so the DLLs resolve. Done when: `delightfile --version`
       prints on the runner. — written 2026-09-29, unverified until the first push.
       The FFmpeg step appends `bin\` to `GITHUB_PATH`, so the df-app tests get it
-      too.
+      too. — done 9afe895, verified on the runner (2026-09-30 note): the smoke test
+      checks the printed `delightfile 0.1.0` since W4.1 (run 36662477949), and is
+      green on `main` in run 36669749789.
 
 **Switching B6.10 to another build** (researched 2026-09-29). The step derives the
 directory name from the URL (the zip's top directory is the asset name without
 `.zip`, for BtbN's builds and gyan.dev's alike), so a switch changes only
-`FFMPEG_URL` and `FFMPEG_SHA256`:
+`FFMPEG_URL` and `FFMPEG_SHA256`, which since 2026-09-30 are the two lines of
+`build/windows/ffmpeg.lock`:
 
 - *A newer BtbN build.* BtbN keeps the last build of each month for two years and
   the last 14 daily builds (its README, "Release Retention Policy"). The `latest`
@@ -315,7 +355,7 @@ the workflow, so a human with the machine can produce the same artifact.
 
 ### 3.1 Linux (`build/linux/`)
 
-- [ ] **B6.14** `build/linux/package.sh` produces
+- [x] **B6.14** `build/linux/package.sh` produces
       `delightfile-<version>-x86_64-linux.tar.gz` containing `delightfile`,
       `build/install.sh`, the wrapper script, the desktop files and icons that
       `install.sh` installs (see appendix B §5 for the list — including
@@ -329,10 +369,18 @@ the workflow, so a human with the machine can produce the same artifact.
       Done when: extracting the tarball on a clean Arch container (no session bus)
       and running `bash install.sh` installs a working binary and prints the
       portal-restart note.
+      — done 0a8d648, verified on the runner: `build/linux/check-package.sh`
+      unpacks the tarball, installs it into an empty home as an unprivileged user
+      with nobody at a terminal, runs the installed `--version`, looks for every
+      installed file and the restart note, and uninstalls. The release run's
+      `verify-linux` job passes it in a fresh `archlinux:latest` with only
+      `ffmpeg` added (run 36729167091), and so does a local container on the
+      tarball downloaded from that run. `install.sh` from a checkout is unchanged
+      (Decisions log, 2026-09-30).
 
 ### 3.2 macOS (`build/macos/`)
 
-- [ ] **B6.15** `build/macos/Info.plist` with `CFBundleIdentifier`
+- [x] **B6.15** `build/macos/Info.plist` with `CFBundleIdentifier`
       `com.showandtour.delightfile` (Brian's domain; change only if he says so),
       `CFBundleExecutable delightfile`, `CFBundleName delightfile`,
       `CFBundleIconFile delightfile.icns`, `CFBundleShortVersionString` and
@@ -340,7 +388,11 @@ the workflow, so a human with the machine can produce the same artifact.
       `13.0`, `NSHighResolutionCapable true`, `CFBundleDocumentTypes` declaring
       `public.folder` so Finder offers the app for folders, and
       `NSSupportsAutomaticGraphicsSwitching true`. Done when: `plutil -lint` passes.
-- [ ] **B6.16** `build/macos/bundle.sh`: assembles `delightfile.app` from
+      — done db8fdae, verified on the runner: `plutil -lint` passes on the filled
+      plist in the release run's macos job and again on the app in the dmg
+      (run 36729167091). `LSMinimumSystemVersion` is not `13.0` but the bundle's
+      real minimum, 26.0 today (Decisions log and Open questions, 2026-09-30).
+- [x] **B6.16** `build/macos/bundle.sh`: assembles `delightfile.app` from
       `target/release/delightfile`: `Contents/MacOS/delightfile`, `Contents/Info.plist`,
       `Contents/Resources/delightfile.icns` (generated from the PNG icons in `build/`
       with `iconutil`), `Contents/Frameworks/` holding `libpdfium.dylib` and every
@@ -352,73 +404,156 @@ the workflow, so a human with the machine can produce the same artifact.
       `open`-less validation passes: `codesign --verify --deep --strict`, `otool -L`
       shows no `/opt/homebrew` or `$HOME` paths, and `Contents/MacOS/delightfile
       --version` runs.
-- [ ] **B6.17** `build/macos/dmg.sh`: `hdiutil create` a compressed dmg
+      — done 7a49209, verified on the runner: the release run's macos job
+      (36729167091) bundles the program, pdfium and 16 Homebrew libraries
+      (libav*, libsw*, libvpx, liblzma, libdav1d, libmp3lame, libmpg123,
+      libopus, libSvtAv1Enc, libx264, libx265, libssl, libcrypto), 41 MB of
+      Frameworks. `build/macos/check-app.sh` passes: `codesign --verify --deep
+      --strict`, `otool -L` on the program and every library naming only
+      `/usr/lib`, `/System` and `@executable_path/../Frameworks/…`, and
+      `--version` printing `delightfile 0.1.0` with every image dyld loads
+      (`DYLD_PRINT_LIBRARIES`) from the system or the bundle. The icon is drawn
+      from the SVG, not the PNGs (Decisions log, 2026-09-30).
+- [x] **B6.17** `build/macos/dmg.sh`: `hdiutil create` a compressed dmg
       `delightfile-<version>-aarch64-macos.dmg` containing the `.app` and an
       `Applications` symlink. Done when: the dmg mounts and the app inside passes
       B6.16's checks.
-- [ ] **B6.18** The app must find `libpdfium.dylib` in `Contents/Frameworks` at
+      — done f19f9f9, verified on the runner: `build/macos/check-dmg.sh`
+      verifies the image, mounts it read-only, finds the Applications link, runs
+      `check-app.sh` on the app where it stands and unmounts it; it passes in the
+      macos job and again in `verify-macos`, a fresh runner without Homebrew's
+      FFmpeg (run 36729167091). The dmg is 28 MB, HFS+ UDZO.
+- [x] **B6.18** The app must find `libpdfium.dylib` in `Contents/Frameworks` at
       runtime: Phase 1/2 adds that search path in the pdfium loader
       (`02-macos.md` cross-references). Done when: PDF preview works in the bundled
       app on a real Mac (`07-verification.md` V7.x) — until then, done at "the loader
       logs the path it tried".
+      — done df33c49, at "the loader logs the path it tried":
+      `platform/macos/pdfium.rs` puts `<exe>/../Frameworks/libpdfium.dylib` after
+      `DF_PDFIUM_LIB`, and `preview::doc::pdf` logs each candidate it tries at
+      debug. The bundle puts the library there (B6.16). PDF preview in the bundle
+      on a Mac is still the live check.
 
 ### 3.3 Windows (`build/windows/`)
 
-- [ ] **B6.19** `build/windows/package.ps1` produces
+- [x] **B6.19** `build/windows/package.ps1` produces
       `delightfile-<version>-x86_64-windows.zip` containing `delightfile.exe`, the
       FFmpeg `bin/*.dll` set from B6.10 (only the libraries the exe imports: check with
       `dumpbin /dependents`, and their transitive deps), `pdfium.dll`, and a
       `README.txt` with the SmartScreen note from §6. Done when: extracting the zip
       on a clean `windows-latest` runner and running `delightfile.exe --version`
       works without any other install.
-- [ ] **B6.20** Icon and version resource: `build/windows/delightfile.rc` referencing
+      — done b20848f, verified on the runner: the zip holds `delightfile.exe`,
+      avcodec-63, avformat-63, avutil-61, swresample-7, swscale-10,
+      `pdfium.dll`, `README.txt`, `LICENSE.txt` and `licenses\` (63 MB), and
+      `package.ps1` refuses a folder where anything imports a DLL that is neither
+      there nor Windows' own. `build/windows/check-package.ps1` unpacks it into an
+      empty folder and runs `--version` with no FFmpeg folder on `PATH`: it
+      prints `delightfile 0.1.0` in the windows job and in `verify-windows`, a
+      fresh runner that never fetched FFmpeg (run 36729167091). The only DLLs
+      outside Windows the exe and its DLLs import are the bundled ones (the C
+      runtime is static, FFmpeg's DLLs use the UCRT that Windows 10 and 11 carry,
+      pdfium imports only kernel32, user32, gdi32 and advapi32).
+- [x] **B6.20** Icon and version resource: `build/windows/delightfile.rc` referencing
       `delightfile.ico` (generated from the PNG icons with ImageMagick or a small
       script in `build/windows/`) and a `VERSIONINFO` block. `crates/df-app/build.rs`
       compiles it with `rc.exe` (always present with the MSVC toolchain) only when
       `CARGO_CFG_WINDOWS` is set, and emits `cargo:rustc-link-arg=<path>.res`. No
       `winres`/`embed-resource` crate. Done when: Explorer shows the icon on the exe
       and `--version`'s number matches the file properties.
-- [ ] **B6.21** `#![windows_subsystem = "windows"]` in `main.rs` gated on
+      — done 83c18a4, verified on the runner: `check-package.ps1` reads the
+      unpacked exe's version resource (FileVersion and ProductVersion `0.1.0`,
+      what `--version` prints) and finds one icon group in it
+      (`ExtractIconExW`), in the windows job and in `verify-windows` (run
+      36729167091); locally `llvm-readobj --coff-resources` on the downloaded exe
+      shows the GROUP_ICON, nine ICON sizes and VERSIONINFO. The icon is drawn
+      from the SVG by ImageMagick on the runner, not committed (Decisions log,
+      2026-09-30). How Explorer draws it is for a person at Windows.
+- [x] **B6.21** `#![windows_subsystem = "windows"]` in `main.rs` gated on
       `cfg(windows)` so no console opens, and `--version`/`--help` still print by
       attaching to the parent console (`AttachConsole(ATTACH_PARENT_PROCESS)` via
       `windows-sys`, attempted unconditionally at startup — it fails harmlessly when
       the app was launched from Explorer). This is a Phase 4 code
       task (`04-windows.md` W4.1); it is listed here because the packaging smoke test
       depends on it. Done when: B6.19's smoke test prints the version in the runner log.
+      — done 5722b0a (W4.1), verified on the runner: B6.19's check prints
+      `--version: delightfile 0.1.0` from the unpacked zip (run 36729167091).
 
 ## 4. Release workflow
 
-- [ ] **B6.22** `.github/workflows/release.yml` on tags `v*`: a `check-version` job
+- [>] **B6.22** `.github/workflows/release.yml` on tags `v*`: a `check-version` job
       that fails unless the tag equals `v` + the workspace version; then the three
       build jobs reusing the CI steps and the §3 scripts; then a `publish` job that
       creates a GitHub Release with the three artifacts and their `.sha256` files,
       marked pre-release until Brian edits it. Done when: a dry-run on a `v0.0.0-test`
       tag on a branch produces all three artifacts (delete the tag afterwards).
-- [ ] **B6.23** Release notes: the workflow drafts them from the commit subjects
+      — written 941060b, needs the first tag. No tag was pushed (Brian's rule for
+      this work); the dry run is a dispatch instead, with `dry_run` on, and run
+      36730956539 on `port/release` (5edac47) produced all three artifacts and
+      checked each on a fresh runner (below). The `version` job is the
+      check-version job; `publish` makes a draft pre-release with
+      `gh release create --verify-tag` and has not run.
+- [>] **B6.23** Release notes: the workflow drafts them from the commit subjects
       since the previous tag. Brian edits before publishing. Done when: the draft
       appears.
+      — written 941060b, needs the first tag: the dry run's `notes.md` holds the
+      install lines and the subjects, cut at 120,000 characters (462 commits and
+      no previous tag: 274 listed, 188 left out and counted). It becomes the
+      draft's text on the first tag.
+
+**Dry run, 2026-09-30.** `gh workflow run release.yml --ref port/release -f
+dry_run=true`, run 36730956539 at 5edac47, green, 13 min 19 s. What it uploaded as
+the `release` artifact, downloaded and checked here with `sha256sum -c`:
+
+| File | Bytes | What was checked, and where |
+|---|---:|---|
+| `delightfile-0.1.0-x86_64-linux.tar.gz` | 11,682,933 | `verify-linux`: fresh `archlinux:latest` with only `ffmpeg`, `check-package.sh` as an unprivileged user. Again in a local container. |
+| `delightfile-0.1.0-aarch64-macos.dmg` | 28,445,723 | macos job and `verify-macos` (no Homebrew FFmpeg): `hdiutil verify`, mounted read-only, `check-app.sh` on the app there (codesign, `otool -L`, `--version`, dyld's loads), unmounted. Unpacked here with 7-Zip: `LSMinimumSystemVersion` 26.0, 17 dylibs in 41 MB of Frameworks, a 1024 px transparent icon. |
+| `delightfile-0.1.0-x86_64-windows.zip` | 63,163,379 | windows job and `verify-windows` (never had FFmpeg): unpacked, `--version` with no FFmpeg on `PATH`, version resource `0.1.0`, one icon group. |
+| `delightfile.rb` | 1,596 | `brew audit --cask --strict` and `brew style` clean in a local tap on Homebrew 6.0.22; installed from the dmg through the tap, quarantined (`com.apple.quarantine … Homebrew Cask`), the caveats' `xattr` line, then `check-app.sh` on `/Applications/delightfile.app`, then uninstalled. |
+| `delightfile.json` | 1,436 | Scoop 0.6.0 from its installer at `1e2f334`, the manifest served from the runner: installed, shim and Start menu shortcut made, the installed exe's `--version` right, uninstalled. |
+| `notes.md` | 120,227 | Drafted, cut to fit (B6.23). |
+| three `.sha256` | ~100 each | `sha256sum -c` here and in each verify job. |
 
 ## 5. Distribution channels
 
-- [ ] **B6.24** Homebrew tap: a repository `brianschwabauer/homebrew-tap` with
-      `Casks/delightfile.rb` pointing at the dmg URL and sha256, `depends_on macos:
-      ">= :ventura"`, and a `caveats` block with the unsigned-app instructions (§6):
-      the recommended command is `brew install --no-quarantine --cask
-      brianschwabauer/tap/delightfile`, because Homebrew **does** quarantine cask
-      downloads by default and only `--no-quarantine` (or
-      `HOMEBREW_CASK_OPTS=--no-quarantine`) skips Gatekeeper's dialog.
+- [>] **B6.24** Homebrew tap: a repository `brianschwabauer/homebrew-tap` with
+      `Casks/delightfile.rb` pointing at the dmg URL and sha256, `depends_on macos:`
+      the bundle's own minimum (`:tahoe` today; B6.24 said `">= :ventura"`, see the
+      Decisions log, 2026-09-30), and a `caveats` block with the unsigned-app
+      instructions (§6): Homebrew **does** quarantine cask downloads, and Homebrew 6
+      removed `--no-quarantine` (and `HOMEBREW_CASK_OPTS=--no-quarantine`), which
+      this task first recommended, so the caveats give
+      `xattr -dr com.apple.quarantine /Applications/delightfile.app`.
       The release workflow opens a PR against the tap bumping version and sha256
       (needs a `TAP_TOKEN` secret with contents write on that repo). Brian creates the
       repository and the token; the agent writes the cask and the workflow step.
       Done when: `brew install --cask brianschwabauer/tap/delightfile` installs on a
       Mac (`07-verification.md`), or until then, `brew audit --cask` passes on the
       runner.
-- [ ] **B6.25** scoop bucket: repository `brianschwabauer/scoop-bucket` with
+      — written ea80186 and 42ecb05, needs the first tag and the tap. The cask is
+      `build/homebrew/delightfile.rb`; the release workflow fills in the version,
+      the dmg's sha256 and `depends_on macos:` and attaches it as `delightfile.rb`.
+      On the dry run's `verify-macos` (36730956539) it passes `brew audit --cask
+      --strict` and `brew style` and installs from the dmg; the first dry run's
+      `brew style` wanted `:tahoe` rather than `">= :tahoe"` (42ecb05). The tap
+      repository does not exist, and the pull-request step is not written: both
+      wait for Brian (Decisions log, 2026-09-30).
+- [>] **B6.25** scoop bucket: repository `brianschwabauer/scoop-bucket` with
       `bucket/delightfile.json` (`url`, `hash`, `bin`, `checkver` on GitHub releases,
       `autoupdate`). Release workflow bumps it the same way. Done when: `scoop bucket
       add` + `scoop install delightfile` works on the runner.
-- [ ] **B6.26** README: an "Installing" section per platform with the exact commands
+      — written 6cf9307 and 5edac47, needs the first tag and the bucket. The
+      manifest is `build/scoop/delightfile.json`, with a Start menu shortcut beside
+      `bin`, and `autoupdate` takes the hash from the zip's `.sha256`; the workflow
+      fills it in and attaches it as `delightfile.json`. On the dry run's
+      `verify-windows` (36730956539), `scoop install` of the filled manifest works
+      and the installed program's `--version` is right. `scoop bucket add` waits
+      for the bucket repository; the shim is a GUI one (Decisions log, 2026-09-30).
+- [>] **B6.26** README: an "Installing" section per platform with the exact commands
       and the unsigned-app notes. Done when: reviewed by Brian.
+      — written ab1faba, marked as pending the first release; waits for Brian's
+      review.
 - [~] **B6.27** winget manifest — skipped until there is a signed build or a user asks;
       winget's review process is slow and a `[~]` here keeps the option visible.
 
@@ -430,7 +565,7 @@ What "unsigned" costs users:
 |----------|------------------------|--------------------------------|
 | macOS 14 | Gatekeeper: "cannot be opened because the developer cannot be verified"; right-click → Open works | Right-click, Open, Open |
 | macOS 15+ | Same dialog but right-click → Open no longer bypasses it | System Settings → Privacy & Security → scroll to "delightfile was blocked" → Open Anyway; or `xattr -d com.apple.quarantine /Applications/delightfile.app` |
-| Homebrew cask | Homebrew quarantines cask downloads by default, so a plain `brew install --cask` hits the same dialog as the dmg | `brew install --no-quarantine --cask …`; the caveats say so |
+| Homebrew cask | Homebrew quarantines cask downloads, so `brew install --cask` hits the same dialog as the dmg; Homebrew 6 has no `--no-quarantine` (Decisions log, 2026-09-30) | `xattr -dr com.apple.quarantine /Applications/delightfile.app` after the install; the caveats say so |
 | Windows | SmartScreen "Windows protected your PC" on the downloaded zip's exe | More info → Run anyway; scoop installs are not SmartScreen-checked |
 
 Why not sign now:
@@ -671,12 +806,121 @@ Why not sign now:
   among the frame's colours, the old judgement fails and the new one passes. With
   `theme::splash` made to return white on the light side, the test fails on the
   permissions ripple with `#14_14_14_14`. Nothing outside the test helpers changed.
+- 2026-09-30 — B6.5: `continue-on-error` is off both jobs. "Required" in the
+  done-when is a branch-protection rule on `main` (Settings, Branches, require the
+  `linux`, `macos` and `windows` checks), a repository setting only Brian can make;
+  the workflow cannot. The tasks' own evidence is that all three jobs are green
+  without it.
+- 2026-09-30 — Lock files are two lines, the URL and then its sha256. B6.10's pin
+  moved from the `windows` job's `env:` into `build/windows/ffmpeg.lock`, and
+  `build/windows/fetch-ffmpeg.ps1` reads it for both workflows, so there is one pin.
+  Each fetch script keeps its download under `target/`, where the release workflow
+  caches the download alone, keyed on the lock's hash, and checks the sha256 on
+  every run, cached or not. The Windows scripts unpack with
+  `%SystemRoot%\System32\tar.exe` by path, because Git for Windows puts a GNU tar on
+  `PATH` that reads `C:` as a host name. `ci.yml` fetches no pdfium: its tests pass
+  either way (§2) and it packages nothing.
+- 2026-09-30 — B6.14: `install.sh` takes what it installs from its own folder
+  (`$here`, which is `build/` in the repository and the top folder in the tarball)
+  and takes the binary beside itself when there is one, before
+  `target/release/delightfile`. B6.14 had the order the other way round; this way
+  a tarball unpacked inside a checkout installs its own binary, not the checkout's
+  build. In the repository `build/delightfile` never exists, so every path
+  `install.sh` reads or prints there is the same string as before. The guards
+  B6.14 asked for were already there: `reload_bus` checks for `busctl` and ignores
+  its failure, and `as_root` only calls `sudo` with a terminal. The tarball also
+  carries `LICENSE` and `README.md`. Its binary links Arch's FFmpeg 9 and glibc, which
+  README's Installing section says.
+- 2026-09-30 — macOS minimum: `LSMinimumSystemVersion` is not B6.15's `13.0` but
+  what the bundle can start on. `bundle.sh` computes it as the newest `minos`
+  (`LC_BUILD_VERSION`) among the program and the libraries it carries, and the
+  cask's `depends_on macos:` follows it. Homebrew builds each bottle for the macOS
+  it is poured on, and on `macos-latest`, which is macOS 26, every Homebrew library
+  in the bundle says `minos 26.0`. The program says 11.0 and pdfium 12.0. dyld
+  refuses a library built for a newer macOS than the one running ("built for macOS
+  26.0 which is newer than running OS"), so this bundle needs macOS 26. Writing
+  `13.0` would ship an app that installs on 13 to 15 and dies at launch. Checked on
+  the tahoe bottle of `ffmpeg` 9.0.2 with `llvm-otool -l` locally, and on the
+  runner's own libraries in bundle.sh's log. How to lower it is in Open questions.
+- 2026-09-30 — Homebrew removed `--no-quarantine`. It was deprecated in 4.7 and 5.0
+  and is gone in 6.x (the runner has 6.0.22), with no replacement: what a cask
+  installs is quarantined. The cask's caveats and README give
+  `xattr -dr com.apple.quarantine /Applications/delightfile.app`, or Open Anyway
+  under System Settings, Privacy & Security. B6.24's recommended command and §6's
+  Homebrew row are corrected. A cask `postflight` that runs `xattr` still works in
+  a third-party tap but is deprecated, and homebrew/cask rejects it, so the cask
+  has none.
+- 2026-09-30 — Both icons are drawn from `build/delightfile.svg` on the runner, not
+  from `build/icons`' PNGs as B6.16 and B6.20 said, because the largest PNG is 256 px
+  and a Mac icon wants 1024. On macOS, `bundle.sh` gives a copy of the SVG a 1024 px
+  size, `sips` draws it (Quick Look is the fallback) and `iconutil` makes the
+  `.icns`. On Windows, `build/windows/icon.ps1` has ImageMagick (7.1.2 on the
+  windows-latest image) draw it at 768 px and scale it to 16 to 256 px in
+  `delightfile.ico`. The `.ico` is generated and git ignores it. `build.rs` puts it
+  in the exe when it exists and warns in a release build when it does not, and
+  `package.ps1` refuses an exe without an icon.
+- 2026-09-30 — B6.20's `crates/df-app/build.rs` runs a resource compiler only when
+  the host and the target are both Windows: `RC` if set, `rc.exe` on `PATH`, the
+  newest Windows Kits 10 x64 `rc.exe`, then `llvm-rc`. The version reaches the `.rc`
+  through a header it writes into `OUT_DIR`, not `/d` defines, which would need
+  quotes through two command-line parsers. The `.res` goes to the `delightfile`
+  binary alone (`rustc-link-arg-bin`), not to test binaries. Elsewhere it prints
+  `rerun-if-changed=build.rs` and returns, so Linux and macOS build what they built
+  before, and `build/xcheck.sh` from Linux, which links nothing and has no `rc`,
+  skips it.
+- 2026-09-30 — The macOS release binary links with
+  `-headerpad_max_install_names`, passed with `cargo rustc … -- -C link-arg=…`, so
+  that `install_name_tool` can write the longer `@executable_path/../Frameworks/…`
+  names into it. `cargo rustc` gives the flag to the final crate only, so no
+  dependency rebuilds and no config file changes.
+- 2026-09-30 — The release workflow checks every package a second time where
+  nothing was built: `verify-linux` in a fresh `archlinux:latest` with only
+  `ffmpeg`, `verify-macos` on a macOS runner without Homebrew's FFmpeg,
+  `verify-windows` on a Windows runner that never fetched FFmpeg, and `publish`
+  needs all three. The brew and scoop installs there point the cask and the
+  manifest at the package on the runner (`file://`, a server on `127.0.0.1`),
+  since during a dry run the release they name does not exist. Scoop's installer
+  is pinned at commit `1e2f334`; Scoop itself installs from its default branch,
+  which is acceptable in a check that builds nothing.
+- 2026-09-30 — GitHub dispatches only a workflow it knows, one on the default
+  branch or one that has run. `release.yml` is not on `main` yet, so it ran once on
+  `port/release` from a temporary `push: branches: [port/release]` trigger (run
+  36727782703), and the commit that carried the trigger was dropped from the branch
+  (a force-push of `port/release`) before the dry runs by dispatch. That first run
+  built all three packages and failed in `check-app.sh`, which took dyld 4's
+  `dyld[pid]: <UUID> <path>` lines and its "move loaded to delayed" notes for paths
+  outside the bundle; the check now reads the path after the UUID and skips lines
+  that name none. Once `release.yml` is on `main`,
+  `gh workflow run release.yml --ref <branch> -f dry_run=true` works for any branch.
+- 2026-09-30 — Anything but a tag is a dry run, and a dispatch on a branch with
+  `dry_run` off is refused. A release is a draft pre-release made by
+  `gh release create --verify-tag`, so the workflow can never make the tag itself.
+- 2026-09-30 — B6.23 on the first release: with no previous tag the notes list every
+  commit subject, about 180 KB, over GitHub's 125,000-character limit on a
+  release's text. The workflow cuts the list at 120,000 characters and says how
+  many earlier commits it left out.
+- 2026-09-30 — The workflow attaches the filled cask and manifest to the release and
+  pushes nowhere. Brian creates `brianschwabauer/homebrew-tap` and copies the
+  release's `delightfile.rb` to `Casks/delightfile.rb` there, and creates
+  `brianschwabauer/scoop-bucket` and copies `delightfile.json` to
+  `bucket/delightfile.json`. The step that would open those pull requests needs a
+  `TAP_TOKEN` secret (a fine-grained token with contents and pull-request write on
+  both repositories) and is not written: without the repositories there is nothing
+  to test it against.
+- 2026-09-30 — Scoop gives a windows-subsystem program a windows-subsystem shim
+  ("Making …\shims\delightfile.exe a GUI binary"). A shell does not wait for one,
+  so `delightfile --version` typed after a scoop install prints nothing where it
+  was typed; the first dry run's check read an empty string from the shim. The
+  window opens as it should, and the program itself prints, so the check now asks
+  the installed exe and looks for the shim and the Start menu shortcut. Whether
+  scoop should put the program's folder on `PATH` instead is in Open questions.
 
 ## Open questions
 
 - Homebrew FFmpeg major on the macOS runner at implementation time (B6.7 resolves).
   (2026-09-29: `formulae.brew.sh` lists `ffmpeg` 9.0.2 with an `arm64_tahoe` bottle.
-  The first run's FFmpeg step log settles it.)
+  The first run's FFmpeg step log settles it.) (2026-09-30: settled on the runner,
+  main's run 36669749789 logs `Homebrew ffmpeg 9.0.1_1, libavcodec 63.1.101`.)
 - Four tests pass on Brian's machine and fail in a clean archlinux container (found
   2026-09-29 in the local run under §1; each fails again when run alone). Until
   they are dealt with, the linux job goes red at `cargo test --workspace`. The two
@@ -707,3 +951,34 @@ Why not sign now:
   `toolchain: 1.98`), and who bumps it?
 - Bundle identifier `com.showandtour.delightfile`: confirm with Brian before the first
   release (it is baked into the notarization record and the app's preferences path).
+- (2026-09-30) Which macOS the release starts on. Built as it is now, it needs macOS
+  26 (Decisions log), where B6.15 and B6.24 planned 13 (Ventura). The ways to lower
+  it:
+  - (a) Keep Homebrew's FFmpeg. The minimum is the runner's macOS: 26 now, and it
+    moves by itself when GitHub moves `macos-latest`, unless the release job pins
+    `macos-26`. No work, no build time; the smallest audience.
+  - (b) Build the release on `macos-15`, whose bottles say `minos 15.0`. One word in
+    `release.yml`; macOS 15 and 26. The image is retired in a year or two, and then
+    the minimum becomes (a)'s.
+  - (c) Build FFmpeg for the release from source with
+    `MACOSX_DEPLOYMENT_TARGET=13.0`, as §2.2's option 3 plus the target and
+    `--enable-libdav1d` for AVIF (dav1d built the same way), cached by version. The
+    minimum is 13.0 as planned, and the bundle drops what Homebrew's FFmpeg links
+    and a previewer never uses (x264, x265, SVT-AV1, lame, openssl, libvpx's
+    encoder). About ten minutes on a cache miss and the most to maintain.
+- (2026-09-30) The bundle declares `public.folder` (B6.15), so Finder's Open With
+  offers delightfile for a folder. But macOS hands the folder over as an
+  open-documents event, and winit 0.30 does not pass that event on, so the app
+  starts in its usual folder rather than the one chosen. Keep the declaration
+  until df-app handles the event, or drop it until then?
+- (2026-09-30) Licenses in the packages. Each carries delightfile's `LICENSE` and
+  pdfium's license files, and the Windows zip carries FFmpeg's `LICENSE.txt`. The
+  macOS bundle does not carry the notices of Homebrew's FFmpeg and what it links
+  (x264 and x265 are GPL, the rest BSD, LGPL or Apache). Distributing GPL FFmpeg
+  binaries also means offering their source. How far should the release go here?
+- (2026-09-30) Scoop and the command line. The manifest's `bin` makes a GUI shim,
+  so `delightfile` from a terminal opens the window but `delightfile --version` and
+  `--help` print nothing there (Decisions log). `"env_add_path": "."` in place of
+  `bin` would put the real exe on `PATH`, which joins the terminal's console and
+  prints (W4.1), at the cost of the FFmpeg DLLs' folder being on `PATH` too. Keep
+  `bin`, or switch?

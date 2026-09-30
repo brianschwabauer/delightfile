@@ -964,9 +964,13 @@ their native clipboards *are* synchronous.
 
 ## 4. Closing the phase
 
-- [ ] **S1.40** Remove `continue-on-error` from the macOS and Windows CI jobs
+- [x] **S1.40** Remove `continue-on-error` from the macOS and Windows CI jobs
       (`06-build-and-release.md` B6.5). Done when: all three jobs are required and
       green on `main`.
+      — done 0e52895 (B6.5), verified on the runner: CI run 36729161540 on
+      `port/release` has all three jobs green with neither allowed to fail. Making
+      them required checks on `main` is a branch-protection setting only Brian can
+      make (`06-build-and-release.md` Decisions log, 2026-09-30).
 - [>] **S1.41** Update `README.md`'s "Building" section: it currently says "Needs a
       Wayland session"; it now says Linux (Wayland) is the supported platform and
       macOS/Windows builds compile but are unverified, linking to `plans/other-platforms/`. Done
