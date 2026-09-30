@@ -717,11 +717,12 @@ fn the_watcher_is_coalesced_and_only_the_touched_folder_is_read() {
 }
 
 /// **Review 3.** `d` then `u`: the row comes back, under its name and without
-/// its mark. The trash is the sandbox's own, so nothing reaches the real one:
-/// the file is trashed there and journalled as `d`'s job journals it, and the
-/// folder is re-read as the job's end re-reads it.
+/// its mark. The trash is the sandbox's own — on a Mac its journal, the file
+/// itself going to Finder's Trash and coming back — so nothing is left in the
+/// real one: the file is trashed there and journalled as `d`'s job journals
+/// it, and the folder is re-read as the job's end re-reads it.
 #[test]
-#[cfg(target_os = "linux")] // a trash to undo (M2.8, W4.7)
+#[cfg(unix)] // a trash to undo: Windows has none yet (W4.7)
 fn undoing_a_trash_brings_the_row_back_unmarked() {
     let mut app = tree("hits-untrash");
     let root = app.files.clone();
@@ -753,10 +754,11 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
 }
 
 /// `d`, `u`, `U`, `u` in the hits: the trash done again takes the row out
-/// again — its file is back in the sandbox's trash, and no stale row stays
-/// for it — and the next `u` brings the row back once more.
+/// again — its file is back in the sandbox's trash, as that trash lists it,
+/// and no stale row stays for it — and the next `u` brings the row back once
+/// more.
 #[test]
-#[cfg(target_os = "linux")] // a trash to redo (M2.8, W4.7)
+#[cfg(unix)] // a trash to redo: Windows has none yet (W4.7)
 fn redoing_a_trash_takes_the_row_out_again() {
     let mut app = tree("hits-retrash");
     let root = app.files.clone();
@@ -773,13 +775,12 @@ fn redoing_a_trash_takes_the_row_out_again() {
 
     app.run(Command::Redo, 10, now);
     assert!(!root.join("docs/foo.txt").exists(), "not trashed again");
-    assert_eq!(
-        std::fs::read_dir(trash.files_dir())
-            .expect("the trash")
-            .count(),
-        1,
-        "into the trash it came out of"
-    );
+    // Asked of the trash itself, which on Linux reads its records and on a
+    // Mac its journal: one item, where it says, from where it was.
+    let listed = trash.list().expect("the trash");
+    assert_eq!(listed.len(), 1, "into the trash it came out of");
+    assert!(std::fs::symlink_metadata(listed[0].location()).is_ok());
+    assert!(listed[0].original.ends_with("docs/foo.txt"));
     let mut names = rows(&app);
     names.sort();
     assert_eq!(names, ["src/deep/foo.txt", "src/foo.txt"]);
