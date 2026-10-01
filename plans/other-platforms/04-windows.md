@@ -811,6 +811,22 @@ from `main` at 6fd5c2a.
       shows a toast come and go, a bar move and a row appear untouched.
       — checked, no change; the probe and a Fifo build were measured and
       dropped (Decisions log). VM: §5.8.
+- [x] **W4.48** A picture with clear parts shows the pane's ground through
+      them on every visit, not only the first (Brian, 2026-10-01, a
+      Linux-visible fix: Decisions log). The black was the yazi-cache JPEG
+      the first visit wrote, drawn under the picture on every visit after.
+      The decode worker scans the full picture's alpha once a decode,
+      stopping at the first pixel below 255 (`decode::is_translucent`), and
+      says so (`Decoded::translucent`); for such a picture the pane drops
+      the placeholder the moment the picture lands, with no crossfade, and
+      no thumbnail is written. A JPEG already in the cache for it is left
+      there. An opaque picture keeps today's path exactly; the grid's tiles
+      are not scanned. Done when: unit tests for the scan, for the worker
+      writing nothing for a translucent PNG and still writing an opaque
+      one, and for the pane dropping the placeholder; and on the VM
+      `disc.svg` with no black square on a second run.
+      — done on `port/windows-repaint`, Linux, macOS and Windows runners
+      green. VM: §5.8.
 
 ## Decisions log
 
@@ -1507,7 +1523,25 @@ from `main` at 6fd5c2a.
   first visit and over a black square in the next run (§5.8). Nothing in it
   is Windows': the same code writes and reads the cache on Linux, for a
   transparent PNG as for an SVG (read in the code, not looked at on a Linux
-  screen), so the fix is a decision (Open questions).
+  screen). Three ways out were put to Brian: drop the placeholder once the
+  picture has faded in; flag a picture with clear parts on the worker, drop
+  its placeholder when it lands and write no JPEG for it; or keep resvg's
+  SVGs out of the cache on macOS and Windows only.
+- (repaint) 2026-10-01 — W4.48, a Linux-visible change, approved by Brian
+  (through the coordinator) as the fix for a bug on every platform: the
+  second of those three. What Linux shows differently, and only for a
+  picture with a pixel below full alpha: from the moment its full decode
+  lands it is drawn alone, where it was drawn over the cache's JPEG, black
+  wherever it is clear; delightfile writes no JPEG for it; and a grid tile
+  for such a file with nothing in the cache decodes the file, as a tile
+  for any uncached picture does, where before it would have found the
+  black JPEG the preview wrote. A JPEG yazi or an earlier delightfile
+  wrote is still read, and still shown as the placeholder until the
+  picture lands; it is not deleted, the cache being shared. Opaque
+  pictures, the great majority, take exactly the path they took. The scan
+  is one byte in four of the full decode and stops at the first clear
+  pixel; the grid's tiles, which decode many pictures a second, are not
+  scanned.
 
 ## Open questions
 
@@ -1521,17 +1555,3 @@ from `main` at 6fd5c2a.
   Viewer", "Open with…"); Linux's does the same (`zed`, `edit`), so it is
   not of this round. Options: the descriptions in the menu on every
   platform (a Linux change); friendlier Windows ids; leave it.
-- (repaint, 2026-10-01) A picture with clear parts shows black through them
-  from its second visit on, on every platform: the yazi-cache JPEG its first
-  visit wrote is drawn under it (Decisions log, W4.44). Options: (a) the
-  placeholder is dropped once the picture has faded in over it — one line
-  in `paint::media_body`, but the black still shows through the crossfade
-  and goes at its end; (b) the decode worker says whether a picture has a
-  pixel that is not opaque, the pane drops the placeholder the moment such
-  a picture lands, and no JPEG is written for it — no black once the
-  picture is up, an alpha scan per decode on the worker, and such a file has
-  no cached thumbnail of delightfile's making, so the grid decodes it whole;
-  (c) on macOS and Windows only, an SVG drawn by resvg is neither written
-  to nor read from the cache — Linux untouched, but a transparent PNG keeps
-  the black everywhere, and so does an SVG on Linux. (a) and (b) change what
-  Linux shows for such a file.

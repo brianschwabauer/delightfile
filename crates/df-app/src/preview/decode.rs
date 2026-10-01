@@ -184,6 +184,15 @@ pub struct Decoded {
     /// and it is not silence either, because the pane is waiting on it (see
     /// [`Plan::decoding`]) and the audio card is waiting on the pane.
     pub result: Result<Option<egui::ColorImage>, String>,
+    /// The picture has a pixel that is not opaque ([`is_translucent`]): a
+    /// [`Stage::Full`]'s answer, `false` on every other stage.
+    ///
+    /// The cached thumbnail is a JPEG, which has no alpha, so what is clear
+    /// in such a picture is black in it; drawn under the picture, as the
+    /// placeholder is, the black shows through. So the pane drops the
+    /// placeholder the moment such a picture lands, and no thumbnail is
+    /// written for it (`plans/other-platforms/04-windows.md` W4.48).
+    pub translucent: bool,
 }
 
 /// Where the **full** picture — the one that replaces the cached thumbnail —
@@ -354,13 +363,14 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
         return;
     }
 
-    let send = |stage, result| {
+    let send_as = |stage, translucent, result| {
         if live(state, token)
             && out
                 .send(Decoded {
                     token,
                     stage,
                     result,
+                    translucent,
                 })
                 .is_ok()
         {
@@ -370,6 +380,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
             false
         }
     };
+    let send = |stage, result| send_as(stage, false, result);
 
     // The placeholder first, always: it is a 600-pixel JPEG and it is on
     // screen before the real decode has finished opening its file.
@@ -417,7 +428,15 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
 
     match still {
         Ok(Some(image)) => {
-            let store_from = store.then(|| (image.width, image.height, image.pixels.clone()));
+            // Once a decode, on the full picture and nowhere else: the grid's
+            // tiles never come through here.
+            let translucent = is_translucent(&image.pixels);
+            // A picture with clear parts is not written back: the JPEG would
+            // be black where it is clear, and the next visit to the file, here
+            // or in yazi, would show that black. One already in the cache is
+            // left there; the pane stops drawing it the moment this lands.
+            let store_from =
+                (store && !translucent).then(|| (image.width, image.height, image.pixels.clone()));
             let color = match to_color(&image) {
                 Ok(color) => color,
                 Err(e) => {
@@ -425,7 +444,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
                     return;
                 }
             };
-            if !send(Stage::Full, Ok(Some(color))) {
+            if !send_as(Stage::Full, translucent, Ok(Some(color))) {
                 return;
             }
             // After the pane has its pixels, never before: the write-back is a
@@ -1082,6 +1101,14 @@ fn pack(plane: &[u8], stride: usize, width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// Whether tightly packed RGBA `pixels` have a pixel that is not opaque —
+/// alpha below 255 — stopping at the first. An opaque photograph is read to
+/// its end, one byte in four, which is a small share of what decoding it
+/// cost.
+fn is_translucent(pixels: &[u8]) -> bool {
+    pixels.iter().skip(3).step_by(4).any(|&alpha| alpha < 255)
+}
+
 /// Write a thumbnail for `path` into the shared yazi cache.
 ///
 /// Temp name in the same directory, then rename over the target, so a reader —
@@ -1177,6 +1204,68 @@ mod tests {
         std::fs::write(&bad, b"this is not a png").expect("write");
         assert!(decode_file(&bad, (200, 200)).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The scan reads the alpha byte of each pixel and nothing else: an
+    /// opaque picture, however dark, is opaque, and one pixel short of 255
+    /// anywhere — the last included — makes it translucent.
+    #[test]
+    fn a_picture_is_translucent_when_any_pixel_is_not_opaque() {
+        assert!(!is_translucent(&[]));
+        let opaque = [0u8, 0, 0, 255].repeat(64);
+        assert!(!is_translucent(&opaque), "black is not clear");
+        let mut edge = opaque.clone();
+        *edge.last_mut().expect("pixels") = 254;
+        assert!(is_translucent(&edge), "the last pixel's alpha");
+        let mut first = opaque;
+        first[3] = 0;
+        assert!(is_translucent(&first));
+        // A colour byte below 255 is a colour, not a hole.
+        assert!(!is_translucent(&[10, 20, 30, 255, 254, 254, 254, 255]));
+    }
+
+    /// The worker end to end, `store` on: a PNG with clear parts comes back
+    /// flagged and leaves nothing in the shared cache, where its JPEG would
+    /// be black wherever it is clear; an opaque one comes back unflagged and
+    /// is written back as before (W4.48).
+    #[test]
+    fn a_picture_with_clear_parts_is_never_written_to_the_cache() {
+        let dir = std::env::temp_dir().join(format!("df-decode-alpha-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let decode = |name: &str, alpha: u8| {
+            let path = dir.join(name);
+            let source = image::RgbaImage::from_fn(64, 64, |x, _| {
+                image::Rgba([0x89, 0xb4, 0xfa, if x < 32 { alpha } else { 255 }])
+            });
+            image::DynamicImage::ImageRgba8(source)
+                .save(&path)
+                .expect("write the fixture");
+            let (tx, rx) = unbounded();
+            let state = AtomicU64::new(7);
+            let job = Job {
+                token: PreviewToken(7),
+                path: path.clone(),
+                target: (64, 64),
+                thumb: None,
+                full: Full::File,
+                store: true,
+            };
+            run(job, &tx, &state, &df_core::fs::no_notifier());
+            let full = rx
+                .try_iter()
+                .find(|decoded| decoded.stage == Stage::Full)
+                .expect("the full picture");
+            assert!(matches!(full.result, Ok(Some(_))), "{name} did not decode");
+            let cached = df_core::preview::cached_thumb(&path);
+            if let Some(thumb) = &cached {
+                let _ = std::fs::remove_file(thumb);
+            }
+            (full.translucent, cached.is_some())
+        };
+        assert_eq!(decode("clear.png", 0), (true, false));
+        assert_eq!(decode("faint.png", 128), (true, false));
+        assert_eq!(decode("opaque.png", 255), (false, true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

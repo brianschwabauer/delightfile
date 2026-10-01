@@ -450,9 +450,9 @@ workflow, launched by double-click from Explorer.
 - [ ] An SVG (W4.44): a drawing with a gradient, a path and words previews
       as its picture, fitted to the pane, the words in a system face; not
       "no decoder".
-- [ ] An SVG or a PNG with clear parts: the pane's ground shows through them
-      on its first visit and on every visit after, in a later run too — today
-      black from the second run on (04-windows.md, Open questions).
+- [ ] An SVG or a PNG with clear parts (W4.48): the pane's ground shows
+      through them on its first visit and on every visit after, in a later
+      run too, with no black square under the picture.
 - [ ] An Affinity file (W4.45): an `.afdesign` or `.af` with its thumbnail
       previews as that picture with "embedded preview" in the corner; one
       without is a card with its name, "Affinity … document", its size and
@@ -733,7 +733,13 @@ release zip is run.
     - `disc.svg`: clear around the disc on its first visit (`14-…`) and on
       a second visit in the same run; in the next run, over a black square
       (`15-…`), the yazi-cache JPEG the first visit wrote (04-windows.md,
-      Decisions log and Open questions).
+      Decisions log; fixed as W4.48).
+  - Run 36935273351 (ab95ef4, W4.48; the same change, its message
+    amended): a fresh `disc.svg` clear around the disc on its first run
+    (`25-…`) and on a second run, the program closed and started again
+    (`26-…`), with no JPEG left for it to find; and the `disc.svg` an
+    earlier build had cached a black JPEG for, opened from the same build,
+    clear once the picture landed (`27-…`).
 
 ## 6. Release gate
 
@@ -791,10 +797,9 @@ release zip is run.
 
 - (repaint) 2026-10-01 — §5.1 gained the window left alone (W4.47), with
   the warning that a screenshot through the viewer comes seconds after a
-  key, longer than a notice lives; §5.6 gained a picture with clear parts,
-  open until the Open question in 04-windows.md is decided; §5.8 records
-  the round, and how to get the frame log out of a windows-subsystem
-  program on the VM.
+  key, longer than a notice lives; §5.6 gained a picture with clear parts
+  (W4.48); §5.8 records the round, and how to get the frame log out of a
+  windows-subsystem program on the VM.
 
 ## Open questions
 

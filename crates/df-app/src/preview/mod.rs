@@ -1662,6 +1662,7 @@ impl Pane {
         let Body::Media(media) = &mut shown.body else {
             return;
         };
+        let translucent = decoded.translucent;
         match (decoded.stage, decoded.result) {
             (decode::Stage::Thumb, Ok(Some(image))) => {
                 // Only while the real thing is still missing: a placeholder
@@ -1674,6 +1675,14 @@ impl Pane {
                 media.full = upload_color(ctx, "df-preview", image);
                 media.swapped_at = Some(now);
                 media.decoding = false;
+                // The placeholder is a JPEG, black where this picture is
+                // clear, and it is drawn under the picture; so for a picture
+                // with clear parts it goes now, and with it the crossfade
+                // (`paint::media_body` fades only over a placeholder). An
+                // opaque picture covers it and keeps its crossfade.
+                if translucent {
+                    media.thumb = None;
+                }
             }
             // A song with no sleeve. Nothing to draw and nothing to report —
             // only the wait is over, which is what lets the audio card have
@@ -2103,6 +2112,7 @@ mod tests {
             token: PreviewToken(1),
             stage: decode::Stage::Full,
             result,
+            translucent: false,
         };
         pane.apply_decoded(answer(Ok(None)), None, now);
         assert_eq!(pane.poster(), Poster::Absent);
@@ -2124,6 +2134,51 @@ mod tests {
         // Text is not a picture, whatever the card thinks of it.
         pane.shown = Some(Shown { body: Body::Empty });
         assert_eq!(pane.poster(), Poster::Absent);
+    }
+
+    /// A picture with clear parts drops the cached placeholder the moment it
+    /// lands, since the placeholder is black where the picture is clear and
+    /// would show through it; an opaque one keeps it under its crossfade, as
+    /// before (W4.48).
+    #[test]
+    fn a_picture_with_clear_parts_drops_its_placeholder_when_it_lands() {
+        let now = Instant::now();
+        let ctx = egui::Context::default();
+        let picture = |translucent: bool| {
+            let mut pane = Pane::start(df_core::fs::no_notifier());
+            pane.shown = Some(Shown {
+                body: Body::Media(Media {
+                    kind: PreviewKind::Image,
+                    thumb: None,
+                    full: None,
+                    swapped_at: None,
+                    anim: None,
+                    error: None,
+                    decoding: true,
+                    doc: None,
+                    note: None,
+                }),
+            });
+            let image = || Ok(Some(egui::ColorImage::filled([4, 4], egui::Color32::BLACK)));
+            let decoded = |stage, translucent| decode::Decoded {
+                token: PreviewToken(1),
+                stage,
+                result: image(),
+                translucent,
+            };
+            pane.apply_decoded(decoded(decode::Stage::Thumb, false), Some(&ctx), now);
+            let media = |pane: &Pane| match &pane.shown {
+                Some(Shown {
+                    body: Body::Media(media),
+                }) => (media.thumb.is_some(), media.full.is_some()),
+                _ => panic!("the body is still the picture's"),
+            };
+            assert_eq!(media(&pane), (true, false), "the placeholder is up");
+            pane.apply_decoded(decoded(decode::Stage::Full, translucent), Some(&ctx), now);
+            media(&pane)
+        };
+        assert_eq!(picture(true), (false, true), "the placeholder stayed");
+        assert_eq!(picture(false), (true, true), "an opaque picture lost it");
     }
 
     /// A pane showing a document with `pages` pages and nothing rendered yet.
