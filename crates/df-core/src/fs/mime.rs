@@ -76,26 +76,60 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("afphoto", "application/x-affinity"),
     ("afpub", "application/x-affinity"),
     ("aftemplate", "application/x-affinity"),
+    // Word, PowerPoint and Excel: the documents, and the templates, slideshows
+    // and macro-enabled files that are the same package under another name.
     ("doc", "application/msword"),
+    ("docm", "application/vnd.ms-word.document.macroEnabled.12"),
     (
         "docx",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ("dotm", "application/vnd.ms-word.template.macroEnabled.12"),
+    (
+        "dotx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
     ),
     ("epub", "application/epub+zip"),
     ("odp", "application/vnd.oasis.opendocument.presentation"),
     ("ods", "application/vnd.oasis.opendocument.spreadsheet"),
     ("odt", "application/vnd.oasis.opendocument.text"),
     ("pdf", "application/pdf"),
+    (
+        "potm",
+        "application/vnd.ms-powerpoint.template.macroEnabled.12",
+    ),
+    (
+        "potx",
+        "application/vnd.openxmlformats-officedocument.presentationml.template",
+    ),
+    (
+        "ppsm",
+        "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
+    ),
+    (
+        "ppsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    ),
     ("ppt", "application/vnd.ms-powerpoint"),
+    (
+        "pptm",
+        "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+    ),
     (
         "pptx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ),
     ("rtf", "application/rtf"),
     ("xls", "application/vnd.ms-excel"),
+    ("xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12"),
     (
         "xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    ("xltm", "application/vnd.ms-excel.template.macroEnabled.12"),
+    (
+        "xltx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
     ),
     // Archives — the family PLAN §6 says needs an extract rule.
     ("7z", "application/x-7z-compressed"),

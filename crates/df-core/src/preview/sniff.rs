@@ -250,12 +250,25 @@ fn sniff_ogg(head: &[u8]) -> Option<&'static str> {
 
 /// The formats that are a zip on disk and previewed as what they are rather
 /// than as a listing of their members, by the type their name gives them:
-/// Word, PowerPoint and Excel's XML formats, read as text, and 3MF, turned on
-/// the turntable. See [`sniff_or_hint`] for why the name is what decides.
+/// Word, PowerPoint and Excel's XML formats — documents, templates,
+/// slideshows and their macro-enabled twins, all one package to the reader —
+/// read as text, and 3MF, turned on the turntable. See [`sniff_or_hint`] for
+/// why the name is what decides.
 const ZIP_PACKAGES: &[&str] = &[
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+    "application/vnd.ms-word.document.macroEnabled.12",
+    "application/vnd.ms-word.template.macroEnabled.12",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.presentationml.template",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+    "application/vnd.ms-powerpoint.template.macroEnabled.12",
+    "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+    "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "application/vnd.ms-excel.template.macroEnabled.12",
     "model/3mf",
 ];
 
@@ -578,6 +591,43 @@ mod tests {
             typed(&libreoffice_order, "budget.xlsx"),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         );
+    }
+
+    /// A template, a slideshow and a macro-enabled workbook are the same
+    /// packages as the documents, and go to the same reader by their names.
+    #[test]
+    fn templates_slideshows_and_macro_files_are_their_packages_too() {
+        let libreoffice_order = zip_led_by(b"_rels/.rels");
+        let word_order = zip_led_by(b"[Content_Types].xml");
+        for (name, head, mime) in [
+            (
+                "letter.dotx",
+                &libreoffice_order,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+            ),
+            (
+                "budget.xlsm",
+                &word_order,
+                "application/vnd.ms-excel.sheet.macroEnabled.12",
+            ),
+            (
+                "talk.ppsx",
+                &word_order,
+                "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+            ),
+            (
+                "report.docm",
+                &libreoffice_order,
+                "application/vnd.ms-word.document.macroEnabled.12",
+            ),
+        ] {
+            assert_eq!(typed(head, name), mime, "{name}");
+            assert_eq!(
+                crate::preview::kind_for_mime(mime, name),
+                crate::preview::PreviewKind::Office,
+                "{name}"
+            );
+        }
     }
 
     #[test]

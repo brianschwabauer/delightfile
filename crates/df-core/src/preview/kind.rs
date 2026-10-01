@@ -158,6 +158,37 @@ const EXACT: &[(&str, PreviewKind)] = &[
     ("application/rtf", PreviewKind::Unsupported),
     ("application/vnd.ms-excel", PreviewKind::Unsupported),
     ("application/vnd.ms-powerpoint", PreviewKind::Unsupported),
+    // The macro-enabled Word, PowerPoint and Excel files: the same packages as
+    // the documents, under Microsoft's own type names rather than the
+    // openxmlformats family the prefix below catches.
+    (
+        "application/vnd.ms-word.document.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-word.template.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-excel.template.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-powerpoint.template.macroEnabled.12",
+        PreviewKind::Office,
+    ),
+    (
+        "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
+        PreviewKind::Office,
+    ),
 ];
 
 /// mime prefix → previewer, longest match first. The bulk of the decision:
