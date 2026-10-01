@@ -168,9 +168,11 @@ const OPEN_WITH_HEARD: std::time::Duration = std::time::Duration::from_millis(25
 
 /// Windows' own "Open with" chooser for `target` (`builtin:shell-open-with`,
 /// W4.41): `SHOpenWithDialog`, the "Select an app to open this file" that
-/// Explorer's "Choose another app" shows, with its Always and Just once
-/// (`OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC`), the chosen
-/// program opening the file.
+/// Explorer's "Choose another app" shows, the chosen program opening the
+/// file. It is asked for Always as well as Just once
+/// (`OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC`), as
+/// Explorer's has them, and Windows decides what it shows: on the VM, Just
+/// once alone, where Explorer's own chooser had both.
 ///
 /// The chooser is modal and waits to be answered, so it is put up from a
 /// thread of its own, given COM, with no owner window, and the window does
