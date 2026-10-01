@@ -54,7 +54,7 @@ pub const CANDIDATES: &[(&str, &[&str], bool, &str)] = &[
     ("run", &["builtin:shell-open"], false, "Run"),
     (
         "open-with",
-        &[r#"rundll32 shell32.dll,OpenAs_RunDLL "$1""#],
+        &["builtin:shell-open-with"],
         false,
         "Open with…",
     ),
@@ -483,16 +483,15 @@ mod tests {
         }
     }
 
-    /// The runner's machine: `cmd` and `rundll32` are on `PATH`, so the
-    /// terminal and "Open with…" are there; `edit` is VS Code, Notepad++ or
-    /// Notepad, whichever this machine has first.
+    /// The runner's machine: `cmd` is on `PATH`, so the terminal is there;
+    /// `edit` is VS Code, Notepad++ or Notepad, whichever this machine has
+    /// first; "Open with…" is the shell's own chooser.
     #[test]
     fn the_shipped_openers_are_what_this_machine_has() {
         let c = Config::default();
         let command = |id: &str| c.opener(id).map(|o| o.command.clone()).unwrap_or_default();
         let path = std::env::var_os("PATH").unwrap_or_default();
         assert!(on_path(&path, "cmd"));
-        assert!(on_path(&path, "rundll32"));
         assert!(
             ["wt -d \"$1\"", "cmd /K cd /d \"$1\""].contains(&command("terminal-here").as_str()),
             "{}",
@@ -504,6 +503,7 @@ mod tests {
             "{edit}"
         );
         assert_eq!(command("open"), "builtin:shell-open");
+        assert_eq!(command("open-with"), "builtin:shell-open-with");
         eprintln!(
             "this machine's alternatives: {:?}",
             c.openers

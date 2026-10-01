@@ -6137,13 +6137,19 @@ impl App {
         now: Instant,
     ) {
         if let Some(builtin) = choice.builtin() {
-            // The system's own "open", where the platform has one to ask
-            // (Windows' opener table names it for `open` and `play`). Where
-            // it has none, the builtin is one delightfile does not know, as
-            // it always was.
-            if builtin == open::SHELL_OPEN_BUILTIN {
+            // The system's own "open" and "Open with" chooser, where the
+            // platform has them to ask (Windows' opener table names them for
+            // `open`, `run`, `font-viewer` and `open-with`). Where it has
+            // none, the builtin is one delightfile does not know, as it
+            // always was.
+            if builtin == open::SHELL_OPEN_BUILTIN || builtin == open::SHELL_OPEN_WITH_BUILTIN {
                 for path in &paths {
-                    match open::shell_open(path.as_os_str()) {
+                    let opened = if builtin == open::SHELL_OPEN_BUILTIN {
+                        open::shell_open(path.as_os_str())
+                    } else {
+                        open::shell_open_with(path.as_os_str())
+                    };
+                    match opened {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
                             self.toasts.error(

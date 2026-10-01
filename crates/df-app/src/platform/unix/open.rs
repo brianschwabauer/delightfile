@@ -96,6 +96,11 @@ pub fn shell_open(_target: &std::ffi::OsStr) -> std::io::Result<()> {
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
+/// `builtin:shell-open-with`, which no opener table here names either.
+pub fn shell_open_with(_target: &std::ffi::OsStr) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
 /// Whether `builtin:font-install` is something this platform does: not
 /// here, where no opener table names it (Windows' is the shell's `install`
 /// verb, W4.43).

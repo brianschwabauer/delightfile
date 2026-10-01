@@ -28,7 +28,9 @@
 
 use std::path::PathBuf;
 
-pub use crate::platform::open::{run_blocking, shell_open, spawn_detached, INSTALLS_FONTS};
+pub use crate::platform::open::{
+    run_blocking, shell_open, shell_open_with, spawn_detached, INSTALLS_FONTS,
+};
 use crate::platform::open::{run_typed, spawn_typed};
 
 /// Whose line a command is, which decides how it is run where that differs:
@@ -69,6 +71,10 @@ pub fn run(
 
 /// The builtin that is the system's own "open" (`builtin:shell-open`).
 pub const SHELL_OPEN_BUILTIN: &str = "shell-open";
+
+/// The builtin that is the system's own "Open with" chooser
+/// (`builtin:shell-open-with`, Windows' `openas` verb, W4.41).
+pub const SHELL_OPEN_WITH_BUILTIN: &str = "shell-open-with";
 
 /// The builtin that installs a font for this user (`builtin:font-install`):
 /// on Windows the shell's own `install` verb, what Explorer's "Install"
@@ -667,6 +673,11 @@ mod tests {
             assert_eq!(
                 list.last().map(|o| o.name.as_str()),
                 Some("open-with"),
+                "{name}"
+            );
+            assert_eq!(
+                list.last().and_then(|o| o.builtin()),
+                Some(SHELL_OPEN_WITH_BUILTIN),
                 "{name}"
             );
         }

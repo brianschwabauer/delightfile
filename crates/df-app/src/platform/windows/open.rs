@@ -154,8 +154,21 @@ pub fn run_typed(line: &str, paths: &[PathBuf], cwd: &Path) -> io::Result<i32> {
 /// What a double-click in Explorer does to `target`: a file opens in its
 /// associated program, a folder or a `shell:` name in an Explorer window.
 pub fn shell_open(target: &OsStr) -> io::Result<()> {
+    shell_execute(target, "open")
+}
+
+/// Windows' own "Open with" chooser for `target`: the shell's `openas`
+/// verb (`builtin:shell-open-with`, W4.41). Not `rundll32
+/// shell32.dll,OpenAs_RunDLL "$1"`, the first form: on the VM it showed
+/// nothing for a file whose name has a space, the path reaching it quoted.
+pub fn shell_open_with(target: &OsStr) -> io::Result<()> {
+    shell_execute(target, "openas")
+}
+
+/// `verb` on `target` through `ShellExecuteW`.
+fn shell_execute(target: &OsStr, verb: &str) -> io::Result<()> {
     let wide = |text: &OsStr| -> Vec<u16> { text.encode_wide().chain(Some(0)).collect() };
-    let verb = wide(OsStr::new("open"));
+    let verb = wide(OsStr::new(verb));
     let file = wide(target);
     // SAFETY: a per-thread start with no pointer but the reserved null. It
     // answers S_OK or S_FALSE (already started, the window's thread) when
