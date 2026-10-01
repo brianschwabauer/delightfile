@@ -2066,11 +2066,11 @@ enum Face {
 }
 
 impl Face {
-    fn icon(&self, theme: &Theme, palette: &Palette, nerd: bool) -> crate::icons::Icon {
+    fn icon(&self, theme: &Theme, palette: &Palette) -> crate::icons::Icon {
         match self {
-            Face::Row(entry) => crate::icons::icon_for(entry, theme, palette, nerd),
-            Face::Clipboard => crate::icons::generic(palette, nerd),
-            Face::Folder => crate::icons::folder(palette, nerd),
+            Face::Row(entry) => crate::icons::icon_for(entry, theme, palette),
+            Face::Clipboard => crate::icons::generic(palette),
+            Face::Folder => crate::icons::folder(palette),
         }
     }
 }
@@ -19306,7 +19306,7 @@ impl App {
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
-                    icon: drag.face.icon(&self.theme, &self.palette, self.nerd),
+                    icon: drag.face.icon(&self.theme, &self.palette),
                     name: &drag.label,
                     count: dnd::ghost_badge(drag.paths.len()),
                     verb: frame.verb.label(),
@@ -19329,7 +19329,7 @@ impl App {
                 paint.ghost(
                     &cards,
                     &ui::GhostFace {
-                        icon: drag.face.icon(&self.theme, &self.palette, self.nerd),
+                        icon: drag.face.icon(&self.theme, &self.palette),
                         name: &drag.label,
                         count: None,
                         verb: if armed { "New window" } else { "" },
@@ -19344,7 +19344,7 @@ impl App {
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
-                    icon: home.face.icon(&self.theme, &self.palette, self.nerd),
+                    icon: home.face.icon(&self.theme, &self.palette),
                     name: &home.label,
                     count: dnd::ghost_badge(home.spring.count()),
                     // A drag that is being cancelled is not carrying a verb any

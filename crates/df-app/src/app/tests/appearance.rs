@@ -350,11 +350,11 @@ fn a_ghost_in_the_hand_turns_with_the_rows() {
         .expect("the Work row");
     let row_icon = |app: &App| {
         let entry = app.tab().cwd.dir.row(index).expect("the row").clone();
-        crate::icons::icon_for(&entry, &app.theme, &app.palette, app.nerd)
+        crate::icons::icon_for(&entry, &app.theme, &app.palette)
     };
     let ghost_icon = |app: &App| {
         let drag = app.drag.as_ref().expect("a drag in the hand");
-        drag.face.icon(&app.theme, &app.palette, app.nerd)
+        drag.face.icon(&app.theme, &app.palette)
     };
 
     // Press on the row and carry it past the threshold, the button held.

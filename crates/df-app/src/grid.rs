@@ -923,17 +923,14 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
                 }
             }
             None => {
-                let icon = crate::icons::icon_for(entry, paint.theme, palette, paint.nerd);
-                let family = if paint.nerd {
-                    egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
-                } else {
-                    egui::FontFamily::Monospace
-                };
-                painter.text(
+                let icon = crate::icons::icon_for(entry, paint.theme, palette);
+                crate::icons::paint(
+                    &painter,
                     thumb.center(),
                     egui::Align2::CENTER_CENTER,
-                    icon.glyph,
-                    egui::FontId::new(ICON_TILE, family),
+                    icon,
+                    egui::FontId::new(ICON_TILE, crate::icons::family()),
+                    paint.nerd,
                     crate::chrome::fade(mute(icon.color, ground, lifted || cut, ignored), alpha),
                 );
             }

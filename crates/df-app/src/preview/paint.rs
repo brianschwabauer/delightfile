@@ -975,17 +975,14 @@ fn archive_body(
     // ── The header ──
     let header =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), scale.row_height));
-    let icon = crate::icons::archive(palette, paint.nerd);
-    let family = if paint.nerd {
-        egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
-    } else {
-        egui::FontFamily::Monospace
-    };
-    painter.text(
+    let icon = crate::icons::archive(palette);
+    crate::icons::paint(
+        painter,
         egui::pos2(header.left() + pad, header.center().y),
         egui::Align2::LEFT_CENTER,
-        icon.glyph,
-        egui::FontId::new(scale.icon, family),
+        icon,
+        egui::FontId::new(scale.icon, crate::icons::family()),
+        paint.nerd,
         icon.color.gamma_multiply(alpha),
     );
     // Three runs on one line: the format, the counts, and the warning. In a
@@ -1124,17 +1121,15 @@ fn archive_row(
         );
     }
     if entry.encrypted {
-        let family = if paint.nerd {
-            egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
-        } else {
-            egui::FontFamily::Proportional
-        };
-        painter.text(
+        let color = palette.yellow.gamma_multiply(alpha);
+        crate::icons::paint(
+            painter,
             egui::pos2(size_left - LOCK_GAP, rect.center().y),
             egui::Align2::RIGHT_CENTER,
-            crate::icons::glyph(paint.nerd, crate::icons::LOCK, crate::icons::LOCK_PLAIN),
-            egui::FontId::new(scale.icon - 2.0, family),
-            palette.yellow.gamma_multiply(alpha),
+            crate::icons::lock(color),
+            egui::FontId::new(scale.icon - 2.0, crate::icons::family()),
+            paint.nerd,
+            color,
         );
     }
 

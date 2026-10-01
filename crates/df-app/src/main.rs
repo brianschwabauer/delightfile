@@ -45,6 +45,8 @@ mod hover;
 mod icons;
 mod input;
 mod keys;
+/// The row icons, drawn when no icon face is loaded.
+mod marks;
 mod menu;
 mod motion;
 mod mounts;

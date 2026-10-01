@@ -659,28 +659,28 @@ pub fn paint_search(
         // The icon, from the same table the listing uses — a `.rs` in the
         // search results and a `.rs` in the column have to be the same glyph in
         // the same colour or the two panes disagree about what a file is.
-        let (glyph, tint) = match &hit.entry {
-            Some(entry) => {
-                let icon = icon_for(entry, paint.theme, palette, paint.nerd);
-                (icon.glyph.to_string(), icon.color)
+        let icon = hit
+            .entry
+            .as_ref()
+            .map(|entry| icon_for(entry, paint.theme, palette));
+        let icon_font = FontId::new(FONT, crate::icons::family());
+        let draw_icon = |at: egui::Pos2| {
+            if let Some(icon) = icon {
+                crate::icons::paint(
+                    &inside,
+                    at,
+                    Align2::LEFT_CENTER,
+                    icon,
+                    icon_font.clone(),
+                    paint.nerd,
+                    icon.color,
+                );
             }
-            None => (" ".to_string(), palette.faint),
-        };
-        let icon_family = if paint.nerd {
-            egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
-        } else {
-            egui::FontFamily::Monospace
         };
         let text_left = rect.left() + PAD_X + ICON_COLUMN;
         match hit.line {
             None => {
-                inside.text(
-                    egui::pos2(rect.left() + PAD_X, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    glyph,
-                    FontId::new(FONT, icon_family),
-                    tint,
-                );
+                draw_icon(egui::pos2(rect.left() + PAD_X, rect.center().y));
                 path_text(
                     &inside,
                     egui::pos2(text_left, rect.center().y),
@@ -694,13 +694,7 @@ pub fn paint_search(
                 // Two lines: where it is, then what it says.
                 let top = rect.top() + rect.height() * 0.3;
                 let bottom = rect.top() + rect.height() * 0.72;
-                inside.text(
-                    egui::pos2(rect.left() + PAD_X, top),
-                    Align2::LEFT_CENTER,
-                    glyph,
-                    FontId::new(FONT, icon_family),
-                    tint,
-                );
+                draw_icon(egui::pos2(rect.left() + PAD_X, top));
                 let used = path_text(
                     &inside,
                     egui::pos2(text_left, top),

@@ -48,9 +48,10 @@
 //! ## Not the file icons
 //!
 //! The row icons are Nerd Font private-use pictures, not symbols in running
-//! text, and they have their own answer: without the font the icon column
-//! turns into `ls -F`'s classifiers ([`crate::icons`]). Nothing here draws
-//! a file icon.
+//! text, and they have their own answer, drawn the same way as these but
+//! not in a line of text: without the font the icon column is
+//! [`crate::marks`]' drawings ([`crate::icons::paint`]). Nothing here
+//! draws a file icon.
 
 use std::sync::Arc;
 

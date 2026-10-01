@@ -1718,14 +1718,14 @@ struct Face {
     key: Option<String>,
 }
 
-fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) -> Face {
+fn face(card: &Card, item: Item, palette: &crate::theme::Palette) -> Face {
     use crate::icons;
     // The icon, the name, the detail, the key, and the identity a call about
     // the row is kept under — none for a row nothing is ever done to.
     let row = match item {
         Item::Disk(i) => card.devices.get(i).map(|device| {
             (
-                icons::drive(palette, nerd, device.removable),
+                icons::drive(palette, device.removable),
                 device.label.clone(),
                 device.detail(),
                 None,
@@ -1735,8 +1735,8 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
         Item::Phone(i) => card.phones.get(i).map(|phone| {
             (
                 match phone.protocol {
-                    Protocol::Mtp => icons::phone(palette, nerd),
-                    Protocol::Gphoto2 => icons::camera(palette, nerd),
+                    Protocol::Mtp => icons::phone(palette),
+                    Protocol::Gphoto2 => icons::camera(palette),
                 },
                 phone.name.clone(),
                 phone.detail(),
@@ -1749,7 +1749,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
         // spec-named directory, which is nobody's idea of where a share is.
         Item::Share(i) => card.shares.get(i).map(|share| {
             (
-                icons::network(palette, nerd),
+                icons::network(palette),
                 share.label.clone(),
                 share.url.clone(),
                 None,
@@ -1761,7 +1761,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
         // in words.
         Item::Cloud(i) => card.clouds.get(i).map(|cloud| {
             (
-                icons::network(palette, nerd),
+                icons::network(palette),
                 cloud.name.clone(),
                 cloud.service(),
                 None,
@@ -1769,7 +1769,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
             )
         }),
         Item::Connect => Some((
-            icons::connect(palette, nerd),
+            icons::connect(palette),
             "Connect to server…".to_string(),
             "smb · sftp · ftp · dav · nfs".to_string(),
             None,
@@ -1778,9 +1778,9 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
         Item::Place(i) => card.places.get(i).map(|place| {
             (
                 if place.remote {
-                    icons::network(palette, nerd)
+                    icons::network(palette)
                 } else {
-                    icons::folder(palette, nerd)
+                    icons::folder(palette)
                 },
                 place.name.clone(),
                 place.detail.clone(),
@@ -1959,13 +1959,9 @@ pub fn paint(
                 );
             }
             Line::Empty(message) => {
-                // In the names' column, where the rows' names would be, when
-                // there are glyphs in front of them.
-                let indent = if paint.nerd {
-                    ICON_COLUMN + crate::chrome::ICON_GAP
-                } else {
-                    0.0
-                };
+                // In the names' column, where the rows' names are, past
+                // their icons.
+                let indent = ICON_COLUMN + crate::chrome::ICON_GAP;
                 clipped.text(
                     egui::pos2(rect.left() + ROW_PAD + indent, rect.center().y),
                     egui::Align2::LEFT_CENTER,
@@ -1999,8 +1995,9 @@ pub fn paint(
                 paint_face(
                     &clipped,
                     rect,
-                    &face(card, item, palette, paint.nerd),
+                    &face(card, item, palette),
                     palette,
+                    paint.nerd,
                 );
             }
         }
@@ -2041,13 +2038,13 @@ fn paint_face(
     rect: egui::Rect,
     face: &Face,
     palette: &crate::theme::Palette,
+    nerd: bool,
 ) {
     let font = egui::FontId::proportional(FONT);
     let detail_font = egui::FontId::proportional(DETAIL_FONT);
-    // Without a patched font there is no glyph to draw — the file rows go
-    // without one too — and then no column either, so the name is not
-    // indented by a blank.
-    let icon = face.icon.filter(|icon| icon.glyph != ' ');
+    // A patched font's glyph, or without one the icon drawn in its place
+    // ([`crate::icons::paint`]): a disk, a stick, a phone, a share.
+    let icon = face.icon;
     let name_width = crate::chrome::text_width(painter, &face.name, font.clone());
     let chip_width = face
         .key
@@ -2055,11 +2052,13 @@ fn paint_face(
         .map(|keys| crate::chrome::text_width(painter, keys, chip_font()) + CHIP_PAD * 2.0);
     let layout = row_layout(rect, icon.is_some(), name_width, chip_width);
     if let (Some(icon), Some(at)) = (icon, layout.glyph) {
-        painter.text(
+        crate::icons::paint(
+            painter,
             at,
             egui::Align2::CENTER_CENTER,
-            icon.glyph,
+            icon,
             egui::FontId::proportional(FONT + 1.0),
+            nerd,
             icon.color,
         );
     }
@@ -2532,11 +2531,10 @@ pub(crate) mod tests {
         );
         card.set_clouds(clouds());
         let said = |item: Item| {
-            let face = face(&card, item, &palette, true);
+            let face = face(&card, item, &palette);
             (face.name, face.detail, face.key)
         };
-        let glyph =
-            |card: &Card, item: Item| face(card, item, &palette, true).icon.map(|i| i.glyph);
+        let glyph = |card: &Card, item: Item| face(card, item, &palette).icon.map(|i| i.glyph);
         assert_eq!(
             said(Item::Disk(0)),
             ("Disk 0".into(), "1.0 GB · ext4 · /run/media/x".into(), None)
@@ -2562,17 +2560,17 @@ pub(crate) mod tests {
         );
         assert_eq!(said(Item::Place(1)).2, None, "a keyless pin has no chip");
         for item in card.items() {
-            let face = face(&card, item, &palette, true);
+            let face = face(&card, item, &palette);
             assert_eq!(face.tone, palette.quiet, "{item:?}: the detail is quiet");
             assert!(face.icon.is_some(), "{item:?}: every row has its glyph");
         }
         assert_eq!(
             glyph(&card, Item::Phone(0)),
-            Some(crate::icons::phone(&palette, true).glyph)
+            Some(crate::icons::phone(&palette).glyph)
         );
         assert_eq!(
             glyph(&card, Item::Place(1)),
-            Some(crate::icons::network(&palette, true).glyph),
+            Some(crate::icons::network(&palette).glyph),
             "a place on another machine wears the server"
         );
         let camera = Phone {
@@ -2582,7 +2580,7 @@ pub(crate) mod tests {
         card.update(Vec::new(), vec![camera], Vec::new());
         assert_eq!(
             glyph(&card, Item::Phone(0)),
-            Some(crate::icons::camera(&palette, true).glyph)
+            Some(crate::icons::camera(&palette).glyph)
         );
         assert_eq!(
             Cloud {
@@ -2634,10 +2632,10 @@ pub(crate) mod tests {
             let mut card = Card::new();
             card.update(many_devices(1), Vec::new(), Vec::new());
             card.start("/block/0", "mounting…");
-            let busy = face(&card, Item::Disk(0), &palette, false);
+            let busy = face(&card, Item::Disk(0), &palette);
             assert_eq!(busy.tone, crate::theme::ink(&palette, palette.peach));
             card.fail("refused");
-            let failed = face(&card, Item::Disk(0), &palette, false);
+            let failed = face(&card, Item::Disk(0), &palette);
             assert_eq!(failed.tone, crate::theme::ink(&palette, palette.red));
         }
     }
@@ -2651,7 +2649,7 @@ pub(crate) mod tests {
         let mut card = Card::new();
         card.update(many_devices(2), vec![pixel(false)], Vec::new());
         let seen = |card: &Card, item: Item| {
-            let face = face(card, item, &palette, false);
+            let face = face(card, item, &palette);
             (face.detail, face.tone)
         };
         card.start("/block/1", "mounting…");
@@ -3373,13 +3371,13 @@ pub(crate) mod tests {
         assert!(!geometry(area, &card).cloud);
 
         let palette = palette();
-        let row = face(&card, Item::Cloud(0), &palette, true);
+        let row = face(&card, Item::Cloud(0), &palette);
         assert_eq!(row.name, "r2");
         assert_eq!(row.detail, "S3", "the service, by the name people know");
         assert_eq!(row.tone, palette.quiet, "nothing is mounted, so no state");
         assert_eq!(
             row.icon.map(|icon| icon.glyph),
-            Some(crate::icons::network(&palette, true).glyph),
+            Some(crate::icons::network(&palette).glyph),
             "the glyph a remote place wears"
         );
     }

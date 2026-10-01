@@ -31,7 +31,7 @@ use df_core::fs::{DirState, LoadState, Span};
 use crate::chrome::fade;
 use crate::format::linemode_text;
 use crate::hover::{pressed_rect, Hovers};
-use crate::icons::{icon_for, name_color, ICON_FAMILY};
+use crate::icons::{icon_for, name_color};
 use crate::ripple::Ripples;
 use crate::theme::{mix, Palette};
 
@@ -1662,21 +1662,17 @@ impl Painting<'_> {
             }
         };
 
-        let icon = icon_for(entry, self.theme, self.palette, self.nerd);
-        // The icon family only exists when a patched font was found: egui
-        // panics on a `FontFamily::Name` nothing is bound to, so the fallback
-        // glyphs (`/`, `@`) are drawn in the monospace face, which is where an
-        // `ls -F` classifier belongs anyway.
-        let icon_family = if self.nerd {
-            egui::FontFamily::Name(ICON_FAMILY.into())
-        } else {
-            egui::FontFamily::Monospace
-        };
-        painter.text(
+        let icon = icon_for(entry, self.theme, self.palette);
+        // The icon family only exists when a patched font was found, and is
+        // only asked then: without one the icon is drawn
+        // ([`crate::icons::paint`], [`crate::marks`]).
+        crate::icons::paint(
+            painter,
             egui::pos2(rect.left() + ROW_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            icon.glyph,
-            egui::FontId::new(scale.icon, icon_family),
+            icon,
+            egui::FontId::new(scale.icon, crate::icons::family()),
+            self.nerd,
             fade(icon.color),
         );
 
@@ -2207,16 +2203,13 @@ impl Painting<'_> {
         }
         let Some(face) = cards.last() else { return };
         let rect = face.rect;
-        let icon_family = if self.nerd {
-            egui::FontFamily::Name(ICON_FAMILY.into())
-        } else {
-            egui::FontFamily::Monospace
-        };
-        self.painter.text(
+        crate::icons::paint(
+            self.painter,
             egui::pos2(rect.left() + ROW_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            top.icon.glyph,
-            egui::FontId::new(ICON_SIZE, icon_family),
+            top.icon,
+            egui::FontId::new(ICON_SIZE, crate::icons::family()),
+            self.nerd,
             fade(top.icon.color, alpha),
         );
         // The badge takes its room out of the name's, so a count never lands on
@@ -3182,10 +3175,7 @@ mod tests {
             paint.drop_target(row, ROW_RADIUS, 0.0, 0.5);
             paint.drop_target(egui::Rect::NOTHING, ROW_RADIUS, 1.0, 0.5);
 
-            let icon = crate::icons::Icon {
-                glyph: '/',
-                color: palette.blue,
-            };
+            let icon = crate::icons::folder(&palette);
             for count in [1usize, 2, 4, 137] {
                 let cards = crate::dnd::ghost_cards(
                     egui::pos2(600.0, 380.0),

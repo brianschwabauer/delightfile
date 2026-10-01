@@ -2196,17 +2196,14 @@ fn paint_facts(
     let icon_x = rect.left() + PAD_X;
     let name_y = rect.top() + 32.0;
     if let Some(entry) = &facts.entry {
-        let icon = crate::icons::icon_for(entry, paint.theme, palette, paint.nerd);
-        let family = if paint.nerd {
-            egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
-        } else {
-            egui::FontFamily::Monospace
-        };
-        painter.text(
+        let icon = crate::icons::icon_for(entry, paint.theme, palette);
+        crate::icons::paint(
+            painter,
             egui::pos2(icon_x, name_y),
             egui::Align2::LEFT_CENTER,
-            icon.glyph,
-            egui::FontId::new(FONT, family),
+            icon,
+            egui::FontId::new(FONT, crate::icons::family()),
+            paint.nerd,
             icon.color,
         );
     }

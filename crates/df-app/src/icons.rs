@@ -18,13 +18,14 @@
 //! help sheet — resolves through the same fallback. Where there is no patched
 //! face to fall back on, [`crate::glyphs`] draws those few itself.
 //!
-//! **When no patched font is installed the icons degrade to `ls -F`.** Not to a
-//! different pictogram set — there isn't one that is reliably present — but to
-//! the classifier suffixes every Unix user already reads: `/` for a directory,
-//! `@` for a symlink, `*` for something you can run, nothing at all for a
-//! regular file. Those are ASCII, so they cannot fail to render, and a column of
-//! them is still a column that says what each row is. The **colours** do not
-//! degrade — they are the half of the treatment that needs no font — so a
+//! **When no patched font is installed the icons are drawn** ([`paint`],
+//! [`crate::marks`]): a folder with a tab for a directory, a page with its
+//! corner folded for a file, the page with an arrow for a link and with `▶`
+//! for something that runs — the four things `ls -F`'s classifiers told
+//! apart, which is what the column fell back to before, and which on a stock
+//! Mac or Windows, never having a Nerd Font, put a `/` before every folder's
+//! name (`plans/other-platforms/04-windows.md` W4.42). The **colours** do
+//! not change — they are the half of the treatment that needs no font — so a
 //! fontless machine still reads a Downloads folder by hue.
 //!
 //! ## What a row's icon says
@@ -138,7 +139,7 @@ fn find_nerd_font_in(dirs: Vec<PathBuf>) -> Option<(PathBuf, Vec<u8>)> {
 /// trap delightviewer's `install_fonts` documents).
 pub fn install(ctx: &egui::Context) -> bool {
     let Some((path, bytes)) = find_nerd_font() else {
-        log::info!("no Nerd Font found; row icons fall back to ls-style classifiers");
+        log::info!("no Nerd Font found; row icons are drawn");
         return false;
     };
     log::debug!("icon font: {}", path.display());
@@ -166,8 +167,41 @@ pub fn install(ctx: &egui::Context) -> bool {
 /// What to draw in a row's icon column.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Icon {
+    /// The icon face's picture.
     pub glyph: char,
     pub color: egui::Color32,
+    /// The drawing that stands in for it where no icon face is loaded.
+    pub mark: Mark,
+}
+
+pub use crate::marks::Mark;
+
+/// Draw `icon` at `pos`, anchored as a line of text is: the face's glyph in
+/// `font` when an icon face is loaded (`nerd`) — exactly the text each
+/// caller drew before there was another way, so the icon column of a
+/// machine with a Nerd Font is the pixels it was — and otherwise its drawn
+/// [`Mark`], `font.size` tall as the glyph would be. The rect drawn in.
+pub fn paint(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    anchor: egui::Align2,
+    icon: Icon,
+    font: egui::FontId,
+    nerd: bool,
+    color: egui::Color32,
+) -> egui::Rect {
+    if nerd {
+        painter.text(pos, anchor, icon.glyph, font, color)
+    } else {
+        crate::marks::paint(painter, pos, anchor, icon.mark, font.size, color)
+    }
+}
+
+/// The face a row's icon is set in when an icon face is loaded; with none,
+/// [`paint`] draws and no face is asked (egui panics on a named family
+/// nothing is bound to, so this must not be built without one).
+pub fn family() -> egui::FontFamily {
+    egui::FontFamily::Name(ICON_FAMILY.into())
 }
 
 /// The generic glyphs, for everything the theme has no rule about. All from the
@@ -177,16 +211,6 @@ const GENERIC_DIR: char = '\u{f4d4}'; // nf-oct-file_directory_fill
 const GENERIC_FILE: char = '\u{f4a5}'; // nf-oct-file
 const GENERIC_LINK: char = '\u{f0c1}'; // nf-fa-link
 const BROKEN_LINK: char = '\u{f127}'; // nf-fa-chain_broken
-
-/// The `ls -F` classifiers, used when no patched font could be loaded. See the
-/// module header: these are ASCII on purpose.
-const PLAIN_DIR: char = '/';
-const PLAIN_LINK: char = '@';
-const PLAIN_FILE: char = ' ';
-/// `ls -F`'s mark for something you can run — the one extra classifier worth
-/// carrying, because "can I execute this" is the question the fallback set is
-/// otherwise silent about.
-const PLAIN_EXEC: char = '*';
 
 /// One glyph per [`FileKind`], all from FontAwesome 4 (`U+F000`–`U+F2E0`) apart
 /// from the two Octicons the file already used.
@@ -398,24 +422,22 @@ pub fn glyph(nerd: bool, patched: char, plain: &'static str) -> String {
 ///
 /// A clipboard carries whatever it carries; a ghost wearing the first file's
 /// icon would claim they are all that kind of thing.
-pub fn generic(palette: &Palette, nerd: bool) -> Icon {
+pub fn generic(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { GENERIC_FILE } else { ' ' },
+        glyph: GENERIC_FILE,
         color: palette.text,
+        mark: Mark::File,
     }
 }
 
 /// The archive kind's glyph and hue, for the preview's archive header: the
 /// same mark an archive's row wears when no logo outranks it, so the header
 /// and the kind column agree about what the file is.
-pub fn archive(palette: &Palette, nerd: bool) -> Icon {
+pub fn archive(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd {
-            kind_glyph(FileKind::Archive)
-        } else {
-            ' '
-        },
+        glyph: kind_glyph(FileKind::Archive),
         color: kind_color(FileKind::Archive, palette),
+        mark: Mark::Archive,
     }
 }
 
@@ -423,17 +445,22 @@ pub fn archive(palette: &Palette, nerd: bool) -> Icon {
 /// (nf-fa-lock — the glyph the `lock` extension already wears).
 pub const LOCK: char = '\u{f023}';
 
-/// …and its stand-in without a patched font: a key, since egui's bundled faces
-/// have no padlock (`the_chrome_glyphs_all_render` holds it to one they do
-/// draw).
-pub const LOCK_PLAIN: &str = "🗝";
+/// The padlock as an icon, drawn where there is no patched font.
+pub fn lock(color: egui::Color32) -> Icon {
+    Icon {
+        glyph: LOCK,
+        color,
+        mark: Mark::Lock,
+    }
+}
 
 /// The plain directory glyph, for a card that stands for a *place* rather than
 /// for a file: the ghost of a tab being dragged out of the strip (PLAN §2).
-pub fn folder(palette: &Palette, nerd: bool) -> Icon {
+pub fn folder(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { GENERIC_DIR } else { ' ' },
+        glyph: GENERIC_DIR,
         color: palette.blue,
+        mark: Mark::Folder,
     }
 }
 
@@ -441,10 +468,11 @@ pub fn folder(palette: &Palette, nerd: bool) -> Icon {
 /// [`folder`] is one on this disk (nf-fa-server). The Places rows of the mount
 /// card wear one or the other, so a folder that is a network round trip away
 /// does not look like one that is not.
-pub fn network(palette: &Palette, nerd: bool) -> Icon {
+pub fn network(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { NETWORK_PLACE } else { ' ' },
+        glyph: NETWORK_PLACE,
         color: palette.teal,
+        mark: Mark::Server,
     }
 }
 
@@ -453,39 +481,44 @@ const NETWORK_PLACE: char = '\u{f233}'; // nf-fa-server
 /// A disk on the Places card: a USB plug for one that comes out, a drive for
 /// one that does not — the question a person scanning for the stick they
 /// just plugged in is asking (nf-fa-usb, nf-fa-hdd_o).
-pub fn drive(palette: &Palette, nerd: bool, removable: bool) -> Icon {
+pub fn drive(palette: &Palette, removable: bool) -> Icon {
+    let (glyph, mark) = if removable {
+        (USB, Mark::Usb)
+    } else {
+        (DRIVE, Mark::Drive)
+    };
     Icon {
-        glyph: match (nerd, removable) {
-            (false, _) => ' ',
-            (true, true) => USB,
-            (true, false) => DRIVE,
-        },
+        glyph,
         color: palette.lavender,
+        mark,
     }
 }
 
 /// A phone gvfs reached over MTP (nf-fa-mobile).
-pub fn phone(palette: &Palette, nerd: bool) -> Icon {
+pub fn phone(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { PHONE } else { ' ' },
+        glyph: PHONE,
         color: palette.green,
+        mark: Mark::Phone,
     }
 }
 
 /// A camera gvfs reached over PTP (nf-fa-camera).
-pub fn camera(palette: &Palette, nerd: bool) -> Icon {
+pub fn camera(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { CAMERA } else { ' ' },
+        glyph: CAMERA,
         color: palette.green,
+        mark: Mark::Camera,
     }
 }
 
 /// The Places card's "Connect to server…" row: a plus, since the row adds a
 /// share rather than being one (nf-fa-plus).
-pub fn connect(palette: &Palette, nerd: bool) -> Icon {
+pub fn connect(palette: &Palette) -> Icon {
     Icon {
-        glyph: if nerd { PLUS } else { ' ' },
+        glyph: PLUS,
         color: palette.subtext0,
+        mark: Mark::Plus,
     }
 }
 
@@ -499,7 +532,7 @@ const PLUS: char = '\u{f067}'; // nf-fa-plus
 ///
 /// `theme` supplies the user's rules — `[[icon.dir]]`'s nineteen and whatever
 /// `[[icon.file]]` adds; `palette` supplies the colours for everything else.
-/// `nerd` says whether the private-use glyphs can actually be drawn.
+/// Whether the glyph or its [`Mark`] is drawn is [`paint`]'s to decide.
 ///
 /// ## The order of the four answers
 ///
@@ -513,7 +546,7 @@ const PLUS: char = '\u{f067}'; // nf-fa-plus
 ///
 /// A **broken** link short-circuits all four: nothing about what a name claims
 /// is true of a link that points at nothing.
-pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> Icon {
+pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette) -> Icon {
     let broken = entry.is_broken_symlink();
     let link = entry.is_symlink();
     let dir = entry.is_dir();
@@ -558,17 +591,19 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
         kind_color(kind, palette)
     };
 
-    let glyph = if !nerd {
-        if dir {
-            PLAIN_DIR
-        } else if link {
-            PLAIN_LINK
-        } else if kind.is_runnable() {
-            PLAIN_EXEC
-        } else {
-            PLAIN_FILE
-        }
-    } else if broken {
+    // What `ls -F` told apart, drawn ([`crate::marks`]): a folder, a link, a
+    // thing that runs, and everything else a page.
+    let mark = if dir {
+        Mark::Folder
+    } else if link {
+        Mark::Link
+    } else if kind.is_runnable() {
+        Mark::Exec
+    } else {
+        Mark::File
+    };
+
+    let glyph = if broken {
         BROKEN_LINK
     } else if let Some(icon) = themed {
         icon.text
@@ -585,7 +620,7 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
         extension_glyph(&entry.name, kind).unwrap_or_else(|| kind_glyph(kind))
     };
 
-    Icon { glyph, color }
+    Icon { glyph, color, mark }
 }
 
 /// The colour a row's *name* is drawn in.
@@ -659,6 +694,28 @@ mod tests {
         entry(name, Kind::File)
     }
 
+    /// One frame at `ppp`, and the shapes `draw` painted in it.
+    pub(super) fn frame(
+        ctx: &egui::Context,
+        ppp: f32,
+        mut draw: impl FnMut(&egui::Painter),
+    ) -> Vec<egui::Shape> {
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                native_pixels_per_point: Some(ppp),
+                ..Default::default()
+            },
+        );
+        ctx.run_ui(input, |ui| draw(ui.painter()))
+            .shapes
+            .into_iter()
+            .map(|clipped| clipped.shape)
+            .filter(|shape| !matches!(shape, egui::Shape::Noop))
+            .collect()
+    }
+
     /// The face is picked by name from the platform's font directories: the
     /// most preferred first whichever directory it is in, a patched face the
     /// list does not name only when nothing it names is there, and an
@@ -695,21 +752,21 @@ mod tests {
     fn a_themed_directory_gets_its_own_glyph_and_colour() {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette, true);
+        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette);
         assert_eq!(icon.glyph, '\u{f0b1}');
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
 
         // On the light side the yazi colour gives way to latte's own red, and
         // a rule somebody wrote keeps the colour they wrote.
         let light = Palette::from_theme(&theme, df_core::config::Appearance::Light);
-        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &light, true);
+        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &light);
         assert_eq!(icon.glyph, '\u{f0b1}');
         assert_eq!(icon.color, light.red);
         let (written, _) = Theme::parse(
             "[[icon.dir]]\nname = \"Work\"\ntext = \"W\"\nfg = \"#f7768e\"\n",
             std::path::Path::new("theme.toml"),
         );
-        let icon = icon_for(&entry("Work", Kind::Dir), &written, &light, true);
+        let icon = icon_for(&entry("Work", Kind::Dir), &written, &light);
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
     }
 
@@ -717,7 +774,7 @@ mod tests {
     fn a_plain_directory_falls_back_to_the_generic_glyph_in_blue() {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let icon = icon_for(&entry("scratch", Kind::Dir), &theme, &palette, true);
+        let icon = icon_for(&entry("scratch", Kind::Dir), &theme, &palette);
         assert_eq!(icon.glyph, GENERIC_DIR);
         assert_eq!(icon.color, palette.blue);
     }
@@ -729,7 +786,7 @@ mod tests {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let e = entry("gone", Kind::Symlink { target: None });
-        assert_eq!(icon_for(&e, &theme, &palette, true).color, palette.red);
+        assert_eq!(icon_for(&e, &theme, &palette).color, palette.red);
         assert_eq!(name_color(&e, &palette), palette.red);
     }
 
@@ -755,7 +812,7 @@ mod tests {
         ];
         let mut glyphs = std::collections::HashSet::new();
         for (name, colour) in cases {
-            let icon = icon_for(&file(name), &theme, &p, true);
+            let icon = icon_for(&file(name), &theme, &p);
             assert_eq!(icon.color, *colour, "colour for {name}");
             glyphs.insert(icon.glyph);
         }
@@ -804,14 +861,14 @@ mod tests {
     fn an_extension_changes_the_glyph_and_not_the_hue() {
         let theme = Theme::default();
         let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let rust = icon_for(&file("main.rs"), &theme, &p, true);
-        let python = icon_for(&file("train.py"), &theme, &p, true);
+        let rust = icon_for(&file("main.rs"), &theme, &p);
+        let python = icon_for(&file("train.py"), &theme, &p);
         assert_ne!(rust.glyph, python.glyph);
         assert_eq!(rust.color, python.color);
         assert_eq!(rust.color, p.yellow);
         // A language the table has no logo for still gets the kind's glyph.
         assert_eq!(
-            icon_for(&file("build.zig"), &theme, &p, true).glyph,
+            icon_for(&file("build.zig"), &theme, &p).glyph,
             kind_glyph(FileKind::Code)
         );
     }
@@ -825,14 +882,11 @@ mod tests {
         );
         assert!(warnings.is_empty(), "{warnings:?}");
         let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let icon = icon_for(&file("main.rs"), &theme, &p, true);
+        let icon = icon_for(&file("main.rs"), &theme, &p);
         assert_eq!(icon.glyph, 'R');
         assert_eq!(icon.color, egui::Color32::WHITE);
         // …and only for the rows it matches.
-        assert_eq!(
-            icon_for(&file("train.py"), &theme, &p, true).color,
-            p.yellow
-        );
+        assert_eq!(icon_for(&file("train.py"), &theme, &p).color, p.yellow);
     }
 
     /// A link's glyph says what it points at and its colour says it is a link:
@@ -847,9 +901,9 @@ mod tests {
                 target: Some(LinkTarget::File),
             },
         );
-        assert_eq!(icon_for(&link, &theme, &p, true).color, p.sky);
+        assert_eq!(icon_for(&link, &theme, &p).color, p.sky);
         assert_eq!(
-            icon_for(&link, &theme, &p, true).glyph,
+            icon_for(&link, &theme, &p).glyph,
             kind_glyph(FileKind::Image)
         );
 
@@ -861,7 +915,7 @@ mod tests {
                 target: Some(LinkTarget::File),
             },
         );
-        assert_eq!(icon_for(&opaque, &theme, &p, true).glyph, GENERIC_LINK);
+        assert_eq!(icon_for(&opaque, &theme, &p).glyph, GENERIC_LINK);
     }
 
     /// Names stay `text` almost always — the icon carries the kind. The two
@@ -878,48 +932,92 @@ mod tests {
         assert_eq!(name_color(&entry("src", Kind::Dir), &p), p.blue);
     }
 
-    /// Without a patched font every glyph must be one a plain Latin face has.
+    /// Without a patched font a row is drawn as what `ls -F` told apart: a
+    /// folder, a link (a broken one too), a thing that runs, and a page for
+    /// everything else, a socket and a pipe included.
     #[test]
-    fn the_fallback_glyphs_are_ascii() {
+    fn a_row_is_drawn_as_what_the_classifier_told_apart() {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        for (name, kind) in [
-            ("Work", Kind::Dir),
-            ("notes.txt", Kind::File),
-            ("deploy.sh", Kind::File),
-            ("holiday.jpg", Kind::File),
+        for (name, kind, mark) in [
+            ("Work", Kind::Dir, Mark::Folder),
+            ("scratch", Kind::Dir, Mark::Folder),
+            ("notes.txt", Kind::File, Mark::File),
+            ("holiday.jpg", Kind::File, Mark::File),
+            ("deploy.sh", Kind::File, Mark::Exec),
             (
                 "link",
                 Kind::Symlink {
                     target: Some(LinkTarget::File),
                 },
+                Mark::Link,
+            ),
+            ("gone", Kind::Symlink { target: None }, Mark::Link),
+            (
+                "to-dir",
+                Kind::Symlink {
+                    target: Some(LinkTarget::Dir),
+                },
+                Mark::Folder,
             ),
         ] {
-            let icon = icon_for(&entry(name, kind), &theme, &palette, false);
-            assert!(icon.glyph.is_ascii(), "{name} drew {:?}", icon.glyph);
+            let icon = icon_for(&entry(name, kind), &theme, &palette);
+            assert_eq!(icon.mark, mark, "{name}");
         }
-        // …and the one classifier the fallback set gains: `ls -F`'s `*`.
-        assert_eq!(
-            icon_for(&file("deploy.sh"), &theme, &palette, false).glyph,
-            PLAIN_EXEC
-        );
     }
 
-    /// …and the themed rule still colours the row even when its glyph cannot
-    /// be drawn, so a fontless machine keeps the folder colours.
+    /// …and the themed rule still colours the row when its glyph cannot be
+    /// drawn, so a fontless machine keeps the folder colours, and the kinds'
+    /// too — the half of the treatment that does not need a font at all.
     #[test]
     fn colours_survive_a_missing_font() {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette, false);
-        assert_eq!(icon.glyph, PLAIN_DIR);
+        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette);
+        assert_eq!(icon.mark, Mark::Folder);
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
-        // The kind colours survive too — that is the half of the treatment
-        // that does not need a font at all.
         assert_eq!(
-            icon_for(&file("holiday.jpg"), &theme, &palette, false).color,
+            icon_for(&file("holiday.jpg"), &theme, &palette).color,
             palette.mauve
         );
+    }
+
+    /// With an icon face, [`paint`] draws exactly the text the icon column
+    /// drew before there was any other way: the same shapes as the
+    /// `painter.text` call each caller made, at a list's size and a tile's,
+    /// at every scale. The face here is egui's own monospace one bound to
+    /// the icon family, so this holds on a machine with no Nerd Font too;
+    /// [`super::glyph_tests`] repeats it with the installed face where there
+    /// is one.
+    #[test]
+    fn with_a_face_the_icon_is_the_text_it_was() {
+        let mut fonts = egui::FontDefinitions::default();
+        let mono = fonts.families[&egui::FontFamily::Monospace][0].clone();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(ICON_FAMILY.into()), vec![mono]);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts);
+        let theme = Theme::default();
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
+        let icon = icon_for(&entry("scratch", Kind::Dir), &theme, &palette);
+        for ppp in [1.0, 1.25, 2.0] {
+            for (anchor, size) in [
+                (egui::Align2::LEFT_CENTER, 12.5),
+                (egui::Align2::CENTER_CENTER, 44.0),
+            ] {
+                let at = egui::pos2(7.0, 11.0);
+                let font = egui::FontId::new(size, family());
+                let ours = frame(&ctx, ppp, |painter| {
+                    paint(painter, at, anchor, icon, font.clone(), true, icon.color);
+                });
+                let before = frame(&ctx, ppp, |painter| {
+                    painter.text(at, anchor, icon.glyph, font.clone(), icon.color);
+                });
+                assert_eq!(ours, before, "{size} at {ppp}");
+                assert!(!ours.is_empty());
+            }
+        }
     }
 
     /// Every extension the glyph table names is spelled the way the lookup
@@ -958,7 +1056,7 @@ mod tests {
     fn a_glyph_never_overrules_the_classifier() {
         let theme = Theme::default();
         let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
-        let glyph = |name: &str| icon_for(&file(name), &theme, &palette, true).glyph;
+        let glyph = |name: &str| icon_for(&file(name), &theme, &palette).glyph;
 
         // `app.ts` is TypeScript; `00001.ts` is a transport stream, and the
         // TypeScript logo on it was the bug.
@@ -1005,7 +1103,7 @@ mod glyph_tests {
         let _ = ctx.run_ui(Default::default(), |_| {});
         let plain = [
             'Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓',
-            '←', '⇧', '≈', '🗝', '≡', '⟷',
+            '←', '⇧', '≈', '≡', '⟷',
             // The permissions card's mixed octal digit, and its `0–7` hint.
             '–',
         ];
@@ -1048,6 +1146,80 @@ mod glyph_tests {
                 "no face draws {c:?} (U+{:04X})",
                 *c as u32
             );
+        }
+    }
+
+    /// **A machine with a Nerd Font draws the icon column it drew** (W4.42):
+    /// with the installed face, every icon [`super::paint`] draws — a row's,
+    /// a tile's, a Places row's in the proportional family — is the same
+    /// shapes, pixel for pixel, as the `painter.text` the column drew before
+    /// marks existed. Skipped, saying so, where no Nerd Font is installed:
+    /// there is nothing to compare, and the marks are what is drawn.
+    #[test]
+    fn with_a_nerd_font_the_icon_column_is_unchanged() {
+        use df_core::fs::{Entry, Kind};
+        let ctx = egui::Context::default();
+        if !super::install(&ctx) {
+            eprintln!("skipped: no Nerd Font on this machine");
+            return;
+        }
+        let theme = df_core::config::Theme::default();
+        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
+        let row = |name: &str, kind: Kind| {
+            let mime = df_core::fs::mime::hint_for_name(name);
+            let entry = Entry {
+                name: name.to_string(),
+                path: std::path::PathBuf::from("/home/brian").join(name),
+                kind,
+                len: 10,
+                mtime: None,
+                btime: None,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                is_hidden: false,
+                mime,
+                file_kind: df_core::fs::classify(kind, name, mime, 0o644),
+                tags: Vec::new(),
+            };
+            super::icon_for(&entry, &theme, &palette)
+        };
+        let icons = [
+            row("Work", Kind::Dir),
+            row("scratch", Kind::Dir),
+            row("main.rs", Kind::File),
+            row("holiday.jpg", Kind::File),
+            row("deploy.sh", Kind::File),
+            super::drive(&palette, true),
+            super::network(&palette),
+            super::archive(&palette),
+        ];
+        for ppp in [1.0, 1.25, 2.0] {
+            for icon in icons {
+                for (anchor, font) in [
+                    (
+                        egui::Align2::LEFT_CENTER,
+                        egui::FontId::new(12.5, super::family()),
+                    ),
+                    (
+                        egui::Align2::CENTER_CENTER,
+                        egui::FontId::new(44.0, super::family()),
+                    ),
+                    (
+                        egui::Align2::CENTER_CENTER,
+                        egui::FontId::proportional(14.0),
+                    ),
+                ] {
+                    let at = egui::pos2(7.0, 11.0);
+                    let ours = super::tests::frame(&ctx, ppp, |painter| {
+                        super::paint(painter, at, anchor, icon, font.clone(), true, icon.color);
+                    });
+                    let before = super::tests::frame(&ctx, ppp, |painter| {
+                        painter.text(at, anchor, icon.glyph, font.clone(), icon.color);
+                    });
+                    assert_eq!(ours, before, "{:?} at {ppp}", icon.glyph);
+                }
+            }
         }
     }
 }
