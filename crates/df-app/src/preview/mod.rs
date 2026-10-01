@@ -6,6 +6,7 @@
 //!                    Pane::poll ◀── PreviewUpdate ────────────────┘
 //!                        │
 //!                        ├─ Text / Markdown ──▶ prepare::Preparer ──▶ paint
+//!                        ├─ …an Office file ──▶ prepare::Preparer ──▶ paint
 //!                        ├─ Directory / Hex ──▶ paint
 //!                        ├─ NeedsDecode ──▶ decode::Decoder ──▶ texture ──▶ paint
 //!                        └─ …an archive ──▶ body::Bodies ──▶ listing ──▶ paint
@@ -63,6 +64,15 @@
 //! they share one shape — a document with a current page, a zoom and an
 //! indicator — even though a specimen sheet has one page and a mesh does not
 //! really have pages at all.
+//!
+//! **Word, PowerPoint and Excel files are [`office`]'s, by way of
+//! [`prepare`].** df-core answers them through the seam too, but there is no
+//! picture to fetch and no page to render: what one of them shows is its text,
+//! as headings, lists and tables, which is a markdown body. So the answer goes
+//! to the same worker a README's parse does, the worker reads the package
+//! instead of parsing source, and what comes back is [`Body::Markdown`] — it
+//! scrolls and remembers its place exactly as a README does, because it is
+//! drawn as one. Nothing about it reaches [`decode`].
 //!
 //! **Archives are [`listing`]'s.** df-core answers an archive through the same
 //! seam, with nothing to decode, so the kind badge goes up on the first frame
@@ -342,6 +352,7 @@ fn kind_word(kind: &PreviewKind) -> Option<&'static str> {
         PreviewKind::Model3d => Some("3d model"),
         PreviewKind::Gcode => Some("g-code"),
         PreviewKind::Archive => Some("archive"),
+        PreviewKind::Office => Some("office"),
         // The picture is a thumbnail the document carries, not the document,
         // and the corner says so.
         PreviewKind::Affinity => Some("embedded preview"),
@@ -1576,6 +1587,22 @@ impl Pane {
                 modified,
                 created,
             },
+            // An Office file is read, not decoded: its text is a markdown
+            // body, prepared off the frame like a README's (see the module
+            // essay). Its own arm, so nothing of the decode path below —
+            // the plan, the decoder, the document view — is reached for it.
+            Preview::NeedsDecode {
+                kind: PreviewKind::Office,
+                path,
+                ..
+            } => {
+                let token = self.token?;
+                let prepared = self.preparer.request(prepare::Job {
+                    token,
+                    source: prepare::Source::Office { path },
+                });
+                body_from_ready(prepared?.ready)
+            }
             Preview::NeedsDecode {
                 kind,
                 path,
@@ -2567,6 +2594,69 @@ mod tests {
         assert_eq!(total, 2);
         assert!(!truncated);
         assert!(!encrypted);
+    }
+
+    /// An Office file is handed to the prepare worker rather than the decoder,
+    /// and comes back the body a README is — which is what makes it scroll and
+    /// remember its place as one.
+    #[test]
+    fn an_office_file_is_read_into_a_markdown_body() {
+        let tree = df_core::test_support::TempTree::new("preview-office-body");
+        let document = br#"<w:document><w:body><w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Notes</w:t></w:r></w:p><w:p><w:r><w:t>Body text.</w:t></w:r></w:p></w:body></w:document>"#;
+        let path = tree.file(
+            "notes.docx",
+            &zip_of(&[
+                ("[Content_Types].xml", b"<Types/>", false),
+                ("word/document.xml", document, false),
+            ]),
+        );
+        let now = Instant::now();
+        let mut pane = Pane::start(df_core::fs::no_notifier());
+        pane.sync(Some(&path), (400, 400), now);
+        let handed = pane.body_for(
+            Preview::NeedsDecode {
+                kind: PreviewKind::Office,
+                path: path.clone(),
+                target: TargetSize::new(400, 400),
+                thumb: None,
+            },
+            now,
+        );
+        assert!(handed.is_none(), "the prepare worker took it");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let prepared = loop {
+            if let Some(prepared) = pane.preparer.drain().pop() {
+                break prepared;
+            }
+            assert!(Instant::now() < deadline, "the worker never answered");
+            std::thread::yield_now();
+        };
+        pane.apply_prepared(prepared);
+        let Some(Shown {
+            body: Body::Markdown { blocks, truncated },
+        }) = &pane.shown
+        else {
+            panic!("an Office file is a markdown body");
+        };
+        let plain = |text: &str| {
+            vec![markdown::Span {
+                text: text.to_string(),
+                style: markdown::Style::default(),
+            }]
+        };
+        assert_eq!(
+            blocks,
+            &vec![
+                markdown::Block::Heading {
+                    level: 1,
+                    spans: plain("Notes"),
+                },
+                markdown::Block::Gap,
+                markdown::Block::Paragraph(plain("Body text.")),
+            ]
+        );
+        assert!(!truncated);
     }
 
     /// The badge goes up first and the listing replaces it; a listing that
