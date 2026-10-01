@@ -71,6 +71,17 @@ mod xlsx;
 /// allocated, because that number is the file's to choose.
 pub const MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
 
+/// The most a whole package may inflate to, over all the parts read from it:
+/// 128 MiB.
+///
+/// [`MAX_PART_BYTES`] holds one part, and two hundred slides each just under
+/// it would still be six gigabytes inflated on a worker nothing can stop
+/// mid-read. So the package keeps a running total, and a part whose declared
+/// size would take it past this is not read: the document ends there,
+/// truncated, like at any other cap. It is four of the largest parts a real
+/// document has, which no real document is.
+pub const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
+
 /// The most blocks a document becomes: 5 000.
 ///
 /// A block is a paragraph, a heading, a list item or a whole table, so this is
@@ -107,25 +118,63 @@ fn read_package<R: Read + Seek>(mut package: Package<R>) -> Result<Reading, Stri
     } else {
         return Err("not a Word, PowerPoint or Excel file".to_string());
     }
-    Ok(out.finish())
+    let mut reading = out.finish();
+    reading.truncated |= package.short;
+    Ok(reading)
 }
 
 /// The zip an Office file is, opened once — its index read once, however many
-/// slides or sheets are asked for after — and asked for its parts by name.
+/// slides or sheets are asked for after — and asked for its parts by name,
+/// all of them out of one budget ([`MAX_PACKAGE_BYTES`]).
 struct Package<R> {
     zip: zip::Package<R>,
+    /// What is left of the budget.
+    budget: u64,
+    /// A part was left unread for the budget.
+    short: bool,
 }
 
 impl<R: Read + Seek> Package<R> {
     fn open(reader: R, len: u64) -> Result<Package<R>, String> {
-        let zip = zip::Package::open(reader, len).map_err(quiet)?;
-        Ok(Package { zip })
+        Package::with_budget(reader, len, MAX_PACKAGE_BYTES)
     }
 
-    /// One part as text, or `None` when the package has no such part.
+    fn with_budget(reader: R, len: u64, budget: u64) -> Result<Package<R>, String> {
+        let zip = zip::Package::open(reader, len).map_err(quiet)?;
+        Ok(Package {
+            zip,
+            budget,
+            short: false,
+        })
+    }
+
+    /// Whether the part `name` can still be read out of the budget — what the
+    /// slide and sheet readers ask before each one, so a deck stops at the
+    /// slide that would not fit rather than going on to name it.
+    fn fits(&self, name: &str) -> bool {
+        self.zip.size(name).is_none_or(|size| size <= self.budget)
+    }
+
+    /// One part as text, or `None` when the package has no such part — or has
+    /// it, and the budget has not room for it, which is also the document
+    /// being cut short.
     fn part(&mut self, name: &str) -> Result<Option<String>, String> {
+        if !self.fits(name) {
+            self.short = true;
+            return Ok(None);
+        }
         let bytes = self.zip.member(name, MAX_PART_BYTES).map_err(quiet)?;
+        if let Some(bytes) = &bytes {
+            // No more than the size `fits` was given: the inflate is held to
+            // the declared length.
+            self.budget = self.budget.saturating_sub(bytes.len() as u64);
+        }
         Ok(bytes.map(|bytes| text(&bytes)))
+    }
+
+    /// Stop here: a part did not fit.
+    fn cut_short(&mut self) {
+        self.short = true;
     }
 }
 
@@ -888,6 +937,78 @@ mod tests {
             ("word/document.xml", xml),
         ]);
         assert_eq!(blocks.len(), 7, "{blocks:?}");
+    }
+
+    /// A package that would inflate past its budget stops at the part that
+    /// would not fit: what was read before it stands, and the reading says
+    /// it was cut short.
+    #[test]
+    fn a_package_stops_at_the_part_its_budget_has_no_room_for() {
+        let sheet = |n: usize| {
+            format!(
+                r#"<worksheet><sheetData><row r="1"><c r="A1"><v>{n}</v></c></row></sheetData><!--{}--></worksheet>"#,
+                "x".repeat(1000)
+            )
+        };
+        let (one, two, three) = (sheet(1), sheet(2), sheet(3));
+        let parts = [
+            ("[Content_Types].xml", "<Types/>"),
+            (
+                "xl/workbook.xml",
+                r#"<workbook><sheets><sheet name="One" r:id="rId1"/><sheet name="Two" r:id="rId2"/><sheet name="Three" r:id="rId3"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Target="worksheets/sheet3.xml"/></Relationships>"#,
+            ),
+            ("xl/worksheets/sheet1.xml", one.as_str()),
+            ("xl/worksheets/sheet2.xml", two.as_str()),
+            ("xl/worksheets/sheet3.xml", three.as_str()),
+        ];
+        let fixed: usize = parts[1..3].iter().map(|(_, xml)| xml.len()).sum();
+        let read = |budget: usize| {
+            let bytes = zip_of(&parts);
+            let len = bytes.len() as u64;
+            Package::with_budget(Cursor::new(bytes), len, budget as u64)
+                .and_then(read_package)
+                .unwrap_or_else(|e| panic!("{e}"))
+        };
+        let heading_names = |reading: &Reading| -> Vec<String> {
+            reading
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Heading { spans, .. } => Some(spans[0].text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Room for two sheets and not the third.
+        let short = read(fixed + 2 * one.len() + 10);
+        assert_eq!(heading_names(&short), ["One", "Two"]);
+        assert!(short.truncated);
+
+        // Room for all three, exactly.
+        let whole = read(fixed + 3 * one.len());
+        assert_eq!(heading_names(&whole), ["One", "Two", "Three"]);
+        assert!(!whole.truncated);
+
+        // A Word file whose styles do not fit reads without them, cut short.
+        let document = r#"<w:document><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Kept</w:t></w:r></w:p></w:body></w:document>"#;
+        let styles = format!("<w:styles>{}</w:styles>", "<w:style/>".repeat(100));
+        let parts = [
+            ("[Content_Types].xml", "<Types/>"),
+            ("word/document.xml", document),
+            ("word/styles.xml", styles.as_str()),
+        ];
+        let bytes = zip_of(&parts);
+        let len = bytes.len() as u64;
+        let reading = Package::with_budget(Cursor::new(bytes), len, document.len() as u64 + 10)
+            .and_then(read_package)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reading.truncated);
+        assert_eq!(reading.blocks, vec![heading(1, "Kept")]);
     }
 
     #[test]

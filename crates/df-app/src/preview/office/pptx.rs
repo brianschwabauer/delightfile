@@ -57,6 +57,11 @@ pub(super) fn read<R: Read + Seek>(
             out.truncate();
             break;
         }
+        // The deck ends at the slide the package's budget has no room for.
+        if part.as_deref().is_some_and(|part| !package.fits(part)) {
+            package.cut_short();
+            break;
+        }
         // A slide the list names and the package does not have is an empty
         // slide, not an unreadable deck.
         let slide = match part {

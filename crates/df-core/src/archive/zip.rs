@@ -698,6 +698,18 @@ impl<R: Read + Seek> Package<R> {
         })
     }
 
+    /// What the index says a member inflates to, by its exact name: `None`
+    /// when no file member has that name. A number in the file, so the most
+    /// [`Package::member`] will hand back for it rather than a promise — which
+    /// is what a reader holding several members to one budget needs to know
+    /// before it asks.
+    pub fn size(&self, name: &str) -> Option<u64> {
+        self.records
+            .iter()
+            .find(|record| !record.entry.is_dir && record.entry.name == name)
+            .map(|record| record.entry.len)
+    }
+
     /// One member's bytes, by its exact name in the central directory.
     ///
     /// `Ok(None)` when no file member has that name: to a format reader a part

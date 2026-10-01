@@ -1755,6 +1755,12 @@ fn a_package_reads_several_members_in_turn() {
         b"",
     );
     let mut package = zip::Package::open(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+    // What each will inflate to is known before any is read.
+    assert_eq!(
+        package.size("word/document.xml"),
+        Some(document.len() as u64)
+    );
+    assert_eq!(package.size("word/numbering.xml"), None);
     assert_eq!(
         package.member("word/styles.xml", 1024).unwrap().as_deref(),
         Some(&b"<w:styles/>"[..])

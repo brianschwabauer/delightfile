@@ -67,6 +67,12 @@ pub(super) fn read<R: Read + Seek>(
             out.truncate();
             break;
         }
+        // The workbook ends at the sheet the package's budget has no room
+        // for, rather than naming it over nothing.
+        if part.as_deref().is_some_and(|part| !package.fits(part)) {
+            package.cut_short();
+            break;
+        }
         out.push(Block::Heading {
             level: 2,
             spans: plain(name),
