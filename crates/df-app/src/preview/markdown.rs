@@ -10,9 +10,15 @@
 //!
 //! ATX headings (`#`…`######`), fenced code blocks with an info string,
 //! bullet and ordered lists with nesting, blockquotes, horizontal rules,
-//! paragraphs, and inline `**bold**`, `*italic*`, `` `code` ``, `[text](url)`
-//! and `<https://autolinks>`. That is the vocabulary of every README this pane
-//! will ever be pointed at.
+//! GitHub's pipe tables, paragraphs, and inline `**bold**`, `*italic*`,
+//! `` `code` ``, `[text](url)` and `<https://autolinks>`. That is the
+//! vocabulary of every README this pane will ever be pointed at.
+//!
+//! Tables were once on the list below, because what they need is a layout
+//! engine rather than a parser. The painter has one now — columns sized to
+//! their content and then fixed, with each cell's text wrapping inside its
+//! column (see [`super::paint`]) — so all that is left here is reading the
+//! pipes.
 //!
 //! ## What it does not, and why that is a choice
 //!
@@ -20,9 +26,9 @@
 //!   preview pane that fetched and decoded images out of a document would be a
 //!   second decode pipeline running on a file the user only glanced at, and it
 //!   is the one markdown feature that can go and read the network.
-//! - **No tables, footnotes, setext headings or HTML passthrough.** Each of
-//!   them is either rare in a README or needs a layout engine (tables) rather
-//!   than a parser.
+//! - **No footnotes, setext headings or HTML passthrough.** Each of them is
+//!   rare in a README, and a `---` under a line of text stays a rule rather
+//!   than turning the line above into a heading.
 //! - **No reference links** (`[a][b]` with a definition elsewhere): resolving
 //!   them means two passes and a map, for a form almost nobody writes any more.
 //!
@@ -216,6 +222,36 @@ pub fn parse(source: &str) -> Vec<Block> {
             continue;
         }
 
+        // ── Table ───────────────────────────────────────────────────────────
+        // A line with a pipe in it is a table's header only if the next line
+        // is a delimiter row with as many cells, so a stray `a | b` in prose
+        // stays prose. The header may be the last line of a paragraph, which
+        // is why the lines before it are flushed rather than joined to it.
+        if let Some(align) = all.get(i + 1).and_then(|next| table_start(trimmed, next)) {
+            flush(&mut pending, &mut blocks);
+            let header = table_row(trimmed, align.len());
+            i += 2;
+            let mut rows = Vec::new();
+            // GitHub would also take a line with no pipe in it as a row of
+            // one cell, ending the table only at a blank line or another
+            // block. Ending it at the first pipe-less line as well means a
+            // sentence written straight under a table, with no blank line
+            // between, reads as the sentence it is rather than as a row.
+            while let Some(line) = all.get(i).map(|l| l.trim()) {
+                if line.is_empty() || !line.contains('|') {
+                    break;
+                }
+                rows.push(table_row(line, align.len()));
+                i += 1;
+            }
+            blocks.push(Block::Table {
+                align,
+                header,
+                rows,
+            });
+            continue;
+        }
+
         // ── Paragraph, accumulating until something else interrupts ─────────
         pending.push(trimmed);
         i += 1;
@@ -260,6 +296,95 @@ fn is_rule(trimmed: &str) -> bool {
         return false;
     };
     matches!(first, '-' | '*' | '_') && t.len() >= 3 && t.chars().all(|c| c == first)
+}
+
+/// The column alignments, if `header` and the line after it open a table.
+///
+/// The header must have a pipe in it and as many cells as the delimiter row
+/// under it, which is GitHub's rule and what keeps a line of prose that
+/// happens to contain a `|` from being read as a table.
+fn table_start(header: &str, delimiter: &str) -> Option<Vec<Align>> {
+    if !header.contains('|') {
+        return None;
+    }
+    let align = delimiter_row(delimiter)?;
+    (split_row(header).len() == align.len()).then_some(align)
+}
+
+/// `| :--- | :---: | ---: |` → left, centre, right.
+///
+/// Each cell is one or more hyphens with an optional colon at either end, and
+/// which ends have one says how the column lines up. A delimiter row with no
+/// pipe in it is a single column — `:---` — except when it is also a rule:
+/// `---` alone stays the horizontal rule it has always been here, never a
+/// one-column table, just as GitHub reads it as a setext underline before it
+/// thinks of tables.
+fn delimiter_row(line: &str) -> Option<Vec<Align>> {
+    let t = line.trim();
+    if !t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+        || (!t.contains('|') && is_rule(t))
+    {
+        return None;
+    }
+    split_row(t)
+        .iter()
+        .map(|cell| {
+            let left = cell.starts_with(':');
+            let right = cell.ends_with(':');
+            let dashes = cell.trim_start_matches(':').trim_end_matches(':');
+            if dashes.is_empty() || !dashes.chars().all(|c| c == '-') {
+                return None;
+            }
+            Some(match (left, right) {
+                (true, true) => Align::Center,
+                (false, true) => Align::Right,
+                _ => Align::Left,
+            })
+        })
+        .collect()
+}
+
+/// One table line as `columns` cells of styled spans: padded with empty cells
+/// when it is short and cut when it is long, so every row the painter gets is
+/// as wide as the table.
+fn table_row(line: &str, columns: usize) -> Vec<Vec<Span>> {
+    let mut cells: Vec<Vec<Span>> = split_row(line)
+        .iter()
+        .take(columns)
+        .map(|cell| inline(cell))
+        .collect();
+    cells.resize(columns, Vec::new());
+    cells
+}
+
+/// A table line's cells, trimmed, with their pipes taken out.
+///
+/// The pipes at either end are optional, so one at the start or the end
+/// closes the row rather than opening an empty cell. `\|` is a pipe inside a
+/// cell. A pipe inside inline code still separates cells, as it does on
+/// GitHub: the row is split before any inline markup is read, so a table
+/// that wants `a|b` in code writes `` `a\|b` ``.
+fn split_row(line: &str) -> Vec<String> {
+    let mut t = line.trim();
+    t = t.strip_prefix('|').unwrap_or(t);
+    if t.ends_with('|') && !t.ends_with("\\|") {
+        t = &t[..t.len() - 1];
+    }
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = t.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                chars.next();
+                cell.push('|');
+            }
+            '|' => cells.push(std::mem::take(&mut cell).trim().to_string()),
+            _ => cell.push(c),
+        }
+    }
+    cells.push(cell.trim().to_string());
+    cells
 }
 
 /// `## Heading` → `(2, "Heading")`. The space is required, so a `#tag` at the
@@ -693,6 +818,146 @@ mod tests {
         assert_eq!(blocks.len(), 4, "{blocks:?}");
     }
 
+    fn cells(texts: &[&str]) -> Vec<Vec<Span>> {
+        texts
+            .iter()
+            .map(|t| if t.is_empty() { Vec::new() } else { plain(t) })
+            .collect()
+    }
+
+    #[test]
+    fn a_table_reads_its_header_alignment_and_rows() {
+        let blocks = parse(
+            "| Name | Size | Kind | Note |\n\
+             | :--- | ---: | :--: | ---- |\n\
+             | a.txt | 12 | file | first |\n\
+             | b | 3 | dir | second |\n",
+        );
+        assert_eq!(
+            blocks,
+            [Block::Table {
+                align: vec![Align::Left, Align::Right, Align::Center, Align::Left],
+                header: cells(&["Name", "Size", "Kind", "Note"]),
+                rows: vec![
+                    cells(&["a.txt", "12", "file", "first"]),
+                    cells(&["b", "3", "dir", "second"]),
+                ],
+            }]
+        );
+    }
+
+    /// The pipes at either end are optional, on every line.
+    #[test]
+    fn a_table_needs_no_outer_pipes() {
+        let blocks = parse("a | b\n--|--:\n1 | 2\n| 3 | 4\n");
+        assert_eq!(
+            blocks,
+            [Block::Table {
+                align: vec![Align::Left, Align::Right],
+                header: cells(&["a", "b"]),
+                rows: vec![cells(&["1", "2"]), cells(&["3", "4"])],
+            }]
+        );
+    }
+
+    /// `\|` is a pipe in a cell, inside code too; a bare pipe inside code
+    /// still splits the cell, as it does on GitHub.
+    #[test]
+    fn an_escaped_pipe_belongs_to_its_cell() {
+        let blocks = parse("| expr | means |\n|---|---|\n| a \\| b | `x \\|\\| y` |\n| `p|q` |\n");
+        let Block::Table { rows, .. } = &blocks[0] else {
+            panic!("not a table: {blocks:?}");
+        };
+        assert_eq!(rows[0][0], plain("a | b"));
+        assert_eq!(rows[0][1][0].text, "x || y");
+        assert!(rows[0][1][0].style.code);
+        assert_eq!(rows[1], cells(&["`p", "q`"]));
+    }
+
+    #[test]
+    fn short_rows_are_padded_and_long_rows_cut() {
+        let blocks = parse("| a | b | c |\n|---|---|---|\n| 1 |\n| 1 | 2 | 3 | 4 |\n");
+        let Block::Table { rows, .. } = &blocks[0] else {
+            panic!("not a table: {blocks:?}");
+        };
+        assert_eq!(rows[0], cells(&["1", "", ""]));
+        assert_eq!(rows[1], cells(&["1", "2", "3"]));
+    }
+
+    #[test]
+    fn a_table_ends_at_a_blank_line_or_a_line_without_a_pipe() {
+        let table = Block::Table {
+            align: vec![Align::Left],
+            header: cells(&["a"]),
+            rows: vec![cells(&["1"])],
+        };
+        assert_eq!(
+            parse("| a |\n|---|\n| 1 |\n\nafter\n"),
+            [table.clone(), Block::Gap, Block::Paragraph(plain("after"))]
+        );
+        assert_eq!(
+            parse("| a |\n|---|\n| 1 |\nprose\n"),
+            [table.clone(), Block::Paragraph(plain("prose"))]
+        );
+        // …and it may start under a paragraph with no blank line, whose
+        // lines stay a paragraph of their own.
+        assert_eq!(
+            parse("intro\n| a |\n|---|\n| 1 |\n"),
+            [Block::Paragraph(plain("intro")), table]
+        );
+    }
+
+    /// GitHub reads `---` under a line as a setext heading, which this parser
+    /// does not do; it has always been a rule here and a table must not
+    /// change that, even under a line with a pipe in it.
+    #[test]
+    fn a_rule_under_text_is_still_a_rule() {
+        assert_eq!(
+            parse("text\n---\n"),
+            [Block::Paragraph(plain("text")), Block::Rule]
+        );
+        assert_eq!(
+            parse("| a |\n---\n"),
+            [Block::Paragraph(plain("| a |")), Block::Rule]
+        );
+    }
+
+    #[test]
+    fn cells_are_styled_inline() {
+        let blocks = parse("| **bold** | [link](x) |\n|---|---|\n| *it* | `code` |\n");
+        let Block::Table { header, rows, .. } = &blocks[0] else {
+            panic!("not a table: {blocks:?}");
+        };
+        assert_eq!(header[0][0].text, "bold");
+        assert!(header[0][0].style.bold);
+        assert_eq!(header[1][0].text, "link");
+        assert!(header[1][0].style.link);
+        assert_eq!(rows[0][0][0].text, "it");
+        assert!(rows[0][0][0].style.italic);
+        assert_eq!(rows[0][1][0].text, "code");
+        assert!(rows[0][1][0].style.code);
+    }
+
+    /// A pipe in prose is not a table without a delimiter row under it, and
+    /// not with one whose cells do not match the header's.
+    #[test]
+    fn a_pipe_without_a_delimiter_row_is_prose() {
+        assert_eq!(
+            parse("a | b\nmore\n"),
+            [Block::Paragraph(plain("a | b more"))]
+        );
+        assert_eq!(parse("| a | b |\n"), [Block::Paragraph(plain("| a | b |"))]);
+        assert_eq!(
+            parse("| a | b |\n| --- |\n"),
+            [Block::Paragraph(plain("| a | b | | --- |"))]
+        );
+        // A delimiter cell must have a hyphen in it.
+        assert_eq!(
+            parse("| a | b |\n| : | --- |\n"),
+            [Block::Paragraph(plain("| a | b | | : | --- |"))]
+        );
+    }
+
     #[test]
     fn emphasis_composes() {
         let spans = inline("a **b *c* d** e");
@@ -777,7 +1042,9 @@ mod tests {
             }
         }
         // …and the same for the block parser.
-        for case in ["```", "> ", "- ", "#", "---", ""] {
+        for case in [
+            "```", "> ", "- ", "#", "---", "", "|", "|\n|", "|\n-", "|---|", "a|\n-|", "\\|\n:-",
+        ] {
             let _ = parse(case);
         }
     }
