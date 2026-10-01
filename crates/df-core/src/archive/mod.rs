@@ -184,6 +184,12 @@ pub enum ArchiveError {
         at: u64,
         want: u64,
     },
+    /// One member that is there and will not be handed back whole
+    /// ([`zip::read_member`]): encrypted, compressed with a method this build
+    /// cannot inflate, or bigger than the caller allowed. The reason is the
+    /// sentence the extractor would refuse the same member with.
+    #[error("{name}: {reason}")]
+    Refused { name: String, reason: String },
 }
 
 impl ArchiveError {
@@ -223,7 +229,9 @@ pub fn detect(path: &Path) -> Result<ArchiveFormat, ArchiveError> {
 /// The format decision, split out so it is a table test.
 pub fn format_for(head: &[u8], path: &Path) -> Result<ArchiveFormat, ArchiveError> {
     match sniff::sniff(head) {
-        Some("application/zip") | Some("application/epub+zip") => return Ok(ArchiveFormat::Zip),
+        Some("application/zip") | Some("application/epub+zip") | Some(sniff::OOXML_MIME) => {
+            return Ok(ArchiveFormat::Zip)
+        }
         Some("application/x-tar") => return Ok(ArchiveFormat::Tar),
         Some("application/gzip") => return Ok(ArchiveFormat::TarGz),
         Some("application/x-xz") => return Ok(ArchiveFormat::TarXz),

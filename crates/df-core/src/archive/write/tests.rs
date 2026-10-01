@@ -533,6 +533,28 @@ fn a_unicode_member_name_goes_in_and_comes_back_as_its_utf8() {
     }
 }
 
+/// The format readers' door into a zip, over what this writer wrote: a stored
+/// member and a deflated one come back whole by name.
+#[test]
+fn a_written_member_is_read_back_by_name() {
+    let t = TempTree::new("write-member");
+    let jpg = (0..20_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let txt = b"the quick brown fox ".repeat(1_000);
+    t.file("src/pics/photo.jpg", &jpg);
+    t.file("src/pics/notes.txt", &txt);
+    let dest = t.join("pics.zip");
+    pack(vec![t.join("src/pics")], dest.clone(), Format::Zip);
+
+    let bytes = std::fs::read(&dest).unwrap();
+    let len = bytes.len() as u64;
+    let read = |name: &str| {
+        crate::archive::zip::read_member(&mut Cursor::new(&bytes), len, name, 1 << 20).unwrap()
+    };
+    assert_eq!(read("pics/photo.jpg"), Some(jpg), "the stored one");
+    assert_eq!(read("pics/notes.txt"), Some(txt), "the deflated one");
+    assert_eq!(read("pics/missing.txt"), None);
+}
+
 // ── Stored or deflated ──────────────────────────────────────────────────────
 
 #[test]

@@ -1732,6 +1732,122 @@ fn one_entry_can_be_read_back_for_a_preview() {
     );
 }
 
+// ── one member, by name: the format readers' door ───────────────────────────
+
+/// `zip::read_member` over an in-memory zip.
+fn member(bytes: &[u8], name: &str, cap: u64) -> Result<Option<Vec<u8>>, ArchiveError> {
+    zip::read_member(&mut Cursor::new(bytes), bytes.len() as u64, name, cap)
+}
+
+#[test]
+fn a_member_is_read_whole_by_name_stored_or_deflated() {
+    let xml = b"<w:document><w:body/></w:document>".repeat(40);
+    let bytes = build_zip(
+        &[
+            ZipMember::file("[Content_Types].xml", b"<Types/>"),
+            ZipMember::file("word/document.xml", &xml).really_deflated(),
+            ZipMember::file("word/styles.xml", b"<w:styles/>"),
+        ],
+        b"",
+    );
+    assert_eq!(
+        member(&bytes, "word/document.xml", 1 << 20).unwrap(),
+        Some(xml.clone())
+    );
+    assert_eq!(
+        member(&bytes, "word/styles.xml", 1 << 20)
+            .unwrap()
+            .as_deref(),
+        Some(&b"<w:styles/>"[..])
+    );
+    // A cap the member fits exactly is a cap it fits.
+    assert_eq!(
+        member(&bytes, "word/document.xml", xml.len() as u64).unwrap(),
+        Some(xml)
+    );
+}
+
+#[test]
+fn an_absent_member_is_none_and_the_name_is_exact() {
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("word"),
+            ZipMember::file("word/document.xml", b"<w:document/>"),
+        ],
+        b"",
+    );
+    assert_eq!(member(&bytes, "word/numbering.xml", 1024).unwrap(), None);
+    // Exact: not case-folded, not normalised, and a folder is not a part.
+    assert_eq!(member(&bytes, "Word/document.xml", 1024).unwrap(), None);
+    assert_eq!(member(&bytes, "/word/document.xml", 1024).unwrap(), None);
+    assert_eq!(member(&bytes, "word/", 1024).unwrap(), None);
+}
+
+#[test]
+fn a_member_that_is_there_and_cannot_be_read_says_why() {
+    let mut bzip2 = ZipMember::file("xl/sharedStrings.xml", b"<sst/>");
+    bzip2.method = 12;
+    let bytes = build_zip(
+        &[
+            ZipMember::file("big.xml", &[b'x'; 4096]),
+            ZipMember::file("secret.xml", b"<x/>").encrypted(),
+            bzip2,
+        ],
+        b"",
+    );
+
+    let err = member(&bytes, "big.xml", 4095).unwrap_err();
+    assert!(
+        matches!(&err, ArchiveError::Refused { name, .. } if name == "big.xml"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("4096 bytes"), "{err}");
+
+    let err = member(&bytes, "secret.xml", 1024).unwrap_err();
+    assert_eq!(err.to_string(), "secret.xml: encrypted");
+
+    let err = member(&bytes, "xl/sharedStrings.xml", 1024).unwrap_err();
+    assert!(err.to_string().contains("bzip2"), "{err}");
+}
+
+#[test]
+fn a_member_that_inflates_past_its_declared_size_is_refused() {
+    // The index says ten bytes; the deflate stream holds four thousand.
+    let mut liar = ZipMember::file("word/document.xml", &[b'a'; 4000]).really_deflated();
+    liar.data.truncate(10);
+    let bytes = build_zip(&[liar], b"");
+    let err = member(&bytes, "word/document.xml", 1 << 20).unwrap_err();
+    assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
+}
+
+#[test]
+fn not_a_zip_is_an_error_not_an_absent_member() {
+    let err = member(b"just some text, long enough to have an end", "a", 1024).unwrap_err();
+    assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
+}
+
+/// An Office package — `[Content_Types].xml` first, which the sniffer reports
+/// as its own type — is still a zip to the archive reader: browsing into a
+/// `.docx` lists its XML.
+#[test]
+fn an_office_package_is_detected_as_the_zip_it_is() {
+    let bytes = build_zip(
+        &[
+            ZipMember::file("[Content_Types].xml", b"<Types/>"),
+            ZipMember::file("word/document.xml", b"<w:document/>"),
+        ],
+        b"",
+    );
+    assert_eq!(
+        crate::preview::sniff(&bytes),
+        Some(crate::preview::sniff::OOXML_MIME)
+    );
+    assert_eq!(
+        format_for(&bytes, Path::new("report.docx")).unwrap(),
+        ArchiveFormat::Zip
+    );
+}
+
 /// The destination map is the whole safety story, so it is checked on its own:
 /// directories merge, files ladder, and the top-level "did we create this"
 /// answer is what decides whether there is an inverse.

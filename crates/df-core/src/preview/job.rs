@@ -544,9 +544,9 @@ pub fn build(request: &PreviewRequest, sort: &SortOptions) -> Result<Preview> {
                 created: entry.btime,
             })
         }
-        // Images, video, audio, PDFs, fonts and models — and archives and
-        // G-code, which need a reader df-core does not have either. All of
-        // them leave through the same seam, and df-app answers them.
+        // Images, video, audio, PDFs, fonts and models — and archives, G-code
+        // and Office files, which need a reader df-core does not have either.
+        // All of them leave through the same seam, and df-app answers them.
         _ => {
             let thumb = if kind.thumbnailable() {
                 cache::cached_thumb(path)

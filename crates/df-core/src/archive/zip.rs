@@ -648,32 +648,143 @@ pub(crate) fn read_one<R: Read + Seek>(
         if local.encrypted {
             continue;
         }
-        // Held to the declared length, the same rule the extractor's bomb
-        // guard applies: a member that inflates past what the index said it
-        // weighs is not the member the listing described, and the preview of
-        // it is no preview at all.
-        let declared = entry.len as usize;
-        let mut out = Vec::with_capacity(declared);
-        let mut overran = false;
-        payload(
-            reader,
-            method,
-            local.data_at,
-            entry.compressed,
-            &mut |chunk| {
-                if out.len() + chunk.len() > declared {
-                    overran = true;
-                    return Ok(false);
-                }
-                out.extend_from_slice(chunk);
-                Ok(true)
-            },
-        )?;
-        if !overran {
+        if let Some(out) = whole(reader, method, local.data_at, entry.compressed, entry.len)? {
             buffer.take(out);
         }
     }
     Ok(())
+}
+
+// ── One member, by name ─────────────────────────────────────────────────────
+//
+// A format that is a zip — an Office document, a 3MF, an epub — is read by
+// asking for its parts by the names its specification gives them:
+// `word/document.xml`, `ppt/slides/slide3.xml`. That is neither a listing nor
+// an extraction. It wants one member, whole, in memory, found by its exact
+// name rather than by a path normalised the way a person browsing the archive
+// would type it, and it wants to hear *why* when a part that is there cannot
+// be read: a reader told "no such part" about an encrypted document would
+// describe the file as something it is not. Everything else is what the two
+// paths above already do, and is done by the same code — the index finds the
+// member, the local header says where its bytes start, the payload is
+// inflated and held to the length the index declared.
+
+/// One member's bytes, by its exact name in the central directory.
+///
+/// `Ok(None)` when no file member has that name: to a format reader a part
+/// that is not there is an answer (an Office document without
+/// `word/styles.xml` is still a document), not a failure. A member that is
+/// there and cannot be handed back is an [`ArchiveError::Refused`] that says
+/// why — encrypted, compressed with a method this build does not inflate, or
+/// declaring more than `cap` bytes.
+///
+/// `cap` is held against the size the index declares, before anything is
+/// allocated, and the inflate is held to that same declared size, so a member
+/// that lies about its length cannot get past the cap that way either. `len`
+/// is the file's length, as for [`list`].
+pub fn read_member<R: Read + Seek>(
+    reader: &mut R,
+    len: u64,
+    name: &str,
+    cap: u64,
+) -> Result<Option<Vec<u8>>, ArchiveError> {
+    // Not consulted: a member past a truncated directory is a member this
+    // reader cannot see, which is `None` like any other absent part.
+    let (records, _truncated) = central(reader, len)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| !record.entry.is_dir && record.entry.name == name)
+    else {
+        return Ok(None);
+    };
+    let entry = &record.entry;
+    let refused = |reason: String| ArchiveError::Refused {
+        name: entry.name.clone(),
+        reason,
+    };
+    if entry.encrypted {
+        return Err(refused("encrypted".to_string()));
+    }
+    let Some(method) = supported(entry.method) else {
+        return Err(refused(format!(
+            "{} compression is not supported",
+            entry.method.label()
+        )));
+    };
+    if entry.len > cap {
+        return Err(refused(format!(
+            "{} bytes, more than the {cap} this reads",
+            entry.len
+        )));
+    }
+    let local = local_header(reader, record.local_at, len)
+        .map_err(from_extraction)?
+        .ok_or_else(|| {
+            malformed(format!(
+                "{name}: the index points at a member that is not there"
+            ))
+        })?;
+    if local.encrypted {
+        return Err(refused("encrypted".to_string()));
+    }
+    whole(reader, method, local.data_at, entry.compressed, entry.len)
+        .map_err(from_extraction)?
+        .map(Some)
+        .ok_or_else(|| {
+            malformed(format!(
+                "{name} inflates past the {} bytes its index declares",
+                entry.len
+            ))
+        })
+}
+
+/// A member's payload inflated whole, or `None` when it inflates past
+/// `declared`.
+///
+/// Held to the declared length, the same rule the extractor's bomb guard
+/// applies: a member that inflates past what the index said it weighs is not
+/// the member the listing described, and the preview of it is no preview at
+/// all. The caller has already held `declared` to a cap of its own, which is
+/// what makes allocating it up front safe.
+fn whole<R: Read + Seek>(
+    reader: &mut R,
+    method: Method,
+    at: u64,
+    compressed: u64,
+    declared: u64,
+) -> crate::Result<Option<Vec<u8>>> {
+    let declared = declared as usize;
+    let mut out = Vec::with_capacity(declared);
+    let mut overran = false;
+    payload(reader, method, at, compressed, &mut |chunk| {
+        if out.len() + chunk.len() > declared {
+            overran = true;
+            return Ok(false);
+        }
+        out.extend_from_slice(chunk);
+        Ok(true)
+    })?;
+    Ok((!overran).then_some(out))
+}
+
+/// The extraction helpers' failures, as the reader's error.
+///
+/// They come back as the crate's error because the extractor's callers want
+/// that one, and only two things are ever in them here: a deflate stream that
+/// would not inflate, and a seek or a read that failed part-way through a file
+/// whose index had just been read whole. The first is a malformed archive and
+/// the second, in practice, a file that changed or a disk that failed under
+/// the read; neither is something a reader of the format can act on
+/// differently, so both become [`ArchiveError::Malformed`], keeping the
+/// sentence and dropping the `zip:` it already carries.
+fn from_extraction(error: crate::DfError) -> ArchiveError {
+    let message = error.to_string();
+    malformed(
+        message
+            .strip_prefix("zip: ")
+            .unwrap_or(&message)
+            .to_string(),
+    )
 }
 
 /// Every member in the central directory, in the order their bytes sit in the

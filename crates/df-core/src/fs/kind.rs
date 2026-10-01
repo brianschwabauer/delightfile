@@ -147,8 +147,8 @@ impl FileKind {
 /// task is "read a Downloads folder at a glance", and the extension is what a
 /// person is reading.
 const EXTENSIONS: &[(&str, FileKind)] = &[
-    // Documents. To the previewer these are `Unsupported`, which is also what a
-    // socket is; here they are the thing you open to read.
+    // Documents. To the previewer most of these are `Unsupported`, which is
+    // also what a socket is; here they are the thing you open to read.
     ("pdf", FileKind::Document),
     ("doc", FileKind::Document),
     ("docx", FileKind::Document),
@@ -484,14 +484,14 @@ fn from_preview(kind: PreviewKind) -> FileKind {
         PreviewKind::Image | PreviewKind::Affinity => FileKind::Image,
         PreviewKind::Video => FileKind::Video,
         PreviewKind::Audio => FileKind::Audio,
-        PreviewKind::Pdf => FileKind::Document,
+        PreviewKind::Pdf | PreviewKind::Office => FileKind::Document,
         PreviewKind::Font => FileKind::Font,
         PreviewKind::Model3d | PreviewKind::Gcode => FileKind::Model3d,
         PreviewKind::Archive => FileKind::Archive,
         PreviewKind::Markdown => FileKind::Markdown,
-        // `Unsupported` reaching here is an office family prefix; the sockets
-        // and broken links that share the variant were answered by `kind_of`
-        // before the mime was ever consulted.
+        // `Unsupported` reaching here is a legacy Office or OpenDocument type;
+        // the sockets and broken links that share the variant were answered by
+        // `kind_of` before the mime was ever consulted.
         PreviewKind::Unsupported => FileKind::Document,
         PreviewKind::Text { syntax: Some(_) } => FileKind::Code,
         PreviewKind::Text { syntax: None } => FileKind::Text,

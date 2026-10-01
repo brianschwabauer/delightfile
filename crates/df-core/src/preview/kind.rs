@@ -2,8 +2,9 @@
 //!
 //! One function, one table, one enum. PLAN §6 lists the built-in previewers —
 //! text, markdown, image, video, audio, PDF, font, 3D model, G-code, directory
-//! listing, archive contents — and this decides which of them a file belongs
-//! to, from its entry and its sniffed type ([`fn@super::sniff`]).
+//! listing, archive contents — and Word, PowerPoint and Excel files have joined
+//! them since; this decides which of them a file belongs to, from its entry
+//! and its sniffed type ([`fn@super::sniff`]).
 //!
 //! It is deliberately a **pure function of two values**. Everything expensive
 //! has already happened by the time it is called (the stat at scan time, the
@@ -16,9 +17,12 @@
 //! - [`PreviewKind::Binary`] — no previewer, but a hexdump is a real, useful
 //!   answer for an ELF or a `.pyc`, and PLAN §6's "never a failure" rule means
 //!   showing *something* beats an error.
-//! - [`PreviewKind::Unsupported`] — there is nothing honest to draw. Office
-//!   documents are the case PLAN §6 explicitly defers ("Office docs: defer;
-//!   keep the opener path"), and devices and sockets join them.
+//! - [`PreviewKind::Unsupported`] — there is nothing honest to draw. PLAN §6
+//!   deferred office documents outright ("Office docs: defer; keep the opener
+//!   path"); what is left of that deferral is the legacy binary `.doc`, `.xls`
+//!   and `.ppt`, RTF and OpenDocument, now that Word, PowerPoint and Excel's
+//!   own XML formats are read as text ([`PreviewKind::Office`]). Devices and
+//!   sockets join them.
 //! - [`PreviewKind::Denied`] — the file exists and cannot be read. Distinct
 //!   from unsupported because the user can *act* on it, and the pane should
 //!   say "permission denied" rather than shrugging.
@@ -54,14 +58,21 @@ pub enum PreviewKind {
     Gcode,
     /// zip/tar/7z/rar and the compressed singletons: a listing of contents.
     Archive,
+    /// A Word, PowerPoint or Excel file in Office Open XML — `.docx`, `.pptx`,
+    /// `.xlsx` and their kin — read in df-app as the text it carries: headings,
+    /// lists, tables, slides and sheets, drawn the way rendered markdown is.
+    /// No page layout, no pictures, no fonts; that is a word processor, and
+    /// the opener is one. The legacy binary formats are not this — they stay
+    /// [`PreviewKind::Unsupported`].
+    Office,
     /// An Affinity document, whose picture is the thumbnail it carries
     /// ([`super::affinity`]), or, where it carries none, its card
     /// ([`super::Preview::Card`]).
     Affinity,
     /// Bytes with no previewer, shown as a hexdump.
     Binary,
-    /// Nothing to draw; the opener rules are the whole answer. Office
-    /// documents, sockets, fifos, devices, broken links.
+    /// Nothing to draw; the opener rules are the whole answer. Legacy Office
+    /// and OpenDocument files, sockets, fifos, devices, broken links.
     Unsupported,
     /// Readable in principle, not by us.
     Denied,
@@ -69,7 +80,8 @@ pub enum PreviewKind {
 
 impl PreviewKind {
     /// Whether df-app has to hand this to a decoder (dv-media, pdfium,
-    /// ttf-parser) rather than rendering it from what df-core already read.
+    /// ttf-parser) or a reader of its own (an Office file's XML) rather than
+    /// rendering it from what df-core already read.
     ///
     /// This is the seam. df-core will not link a decoder — PLAN §1 keeps the
     /// headless half testable without ffmpeg — so for these kinds the worker
@@ -84,6 +96,7 @@ impl PreviewKind {
                 | PreviewKind::Font
                 | PreviewKind::Model3d
                 | PreviewKind::Affinity
+                | PreviewKind::Office
         )
     }
 
@@ -137,9 +150,9 @@ const EXACT: &[(&str, PreviewKind)] = &[
         PreviewKind::Archive,
     ),
     ("application/x-iso9660-image", PreviewKind::Archive),
-    // Office and e-books: PLAN §6 defers these to the opener path. epub is
-    // here rather than under Archive on purpose — listing its zip members is
-    // a worse answer than the opener, not a better one.
+    // Legacy Office, RTF and e-books: PLAN §6 defers these to the opener path.
+    // epub is here rather than under Archive on purpose — listing its zip
+    // members is a worse answer than the opener, not a better one.
     ("application/epub+zip", PreviewKind::Unsupported),
     ("application/msword", PreviewKind::Unsupported),
     ("application/rtf", PreviewKind::Unsupported),
@@ -155,8 +168,18 @@ const FAMILIES: &[(&str, PreviewKind)] = &[
     ("audio/", PreviewKind::Audio),
     ("font/", PreviewKind::Font),
     ("model/", PreviewKind::Model3d),
-    // Anything `application/vnd.openxmlformats-` or `.oasis.` — the office
-    // families, matched by prefix so a new member of either needs no entry.
+    // Word, PowerPoint and Excel's XML formats, by prefix: a template or a
+    // slideshow is the same package as the document, and the sniffer's own
+    // answer for a package that says no more than that it is one
+    // (`super::sniff::OOXML_MIME`) is the prefix itself. Before the general
+    // `openxmlformats-` entry below, which it would otherwise be shadowed by.
+    (
+        "application/vnd.openxmlformats-officedocument",
+        PreviewKind::Office,
+    ),
+    // The rest of `application/vnd.openxmlformats-` and all of `.oasis.` —
+    // what is left of the office families, matched by prefix so a new member
+    // of either needs no entry.
     ("application/vnd.openxmlformats-", PreviewKind::Unsupported),
     ("application/vnd.oasis.", PreviewKind::Unsupported),
 ];
@@ -259,6 +282,27 @@ mod tests {
             ("part.3mf", "model/3mf", PreviewKind::Model3d),
             ("part.gcode", "text/x.gcode", PreviewKind::Gcode),
             ("notes.md", "text/markdown", PreviewKind::Markdown),
+            (
+                "report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                PreviewKind::Office,
+            ),
+            (
+                "deck.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                PreviewKind::Office,
+            ),
+            (
+                "budget.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                PreviewKind::Office,
+            ),
+            // What the sniffer says of a package whose name says nothing.
+            (
+                "report",
+                "application/vnd.openxmlformats-officedocument",
+                PreviewKind::Office,
+            ),
             ("src.tar.gz", "application/gzip", PreviewKind::Archive),
             ("src.zip", "application/zip", PreviewKind::Archive),
             (
@@ -296,12 +340,14 @@ mod tests {
     }
 
     #[test]
-    fn office_documents_go_to_the_opener_not_a_previewer() {
+    fn legacy_office_and_opendocument_go_to_the_opener_not_a_previewer() {
         let cases = [
             "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "application/vnd.ms-powerpoint",
+            "application/rtf",
             "application/vnd.oasis.opendocument.text",
+            "application/vnd.oasis.opendocument.spreadsheet",
             "application/epub+zip",
         ];
         for mime in cases {
@@ -378,6 +424,9 @@ mod tests {
         assert!(!PreviewKind::Text { syntax: None }.needs_decode());
         assert!(!PreviewKind::Directory.needs_decode());
         assert!(!PreviewKind::Archive.needs_decode());
+        // Read in df-app, and never from a thumbnail: its text is the preview.
+        assert!(PreviewKind::Office.needs_decode());
+        assert!(!PreviewKind::Office.thumbnailable());
 
         assert!(PreviewKind::Image.thumbnailable());
         assert!(PreviewKind::Video.thumbnailable());

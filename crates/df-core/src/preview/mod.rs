@@ -28,11 +28,12 @@
 //! ## Where df-core stops
 //!
 //! It does not decode anything. Images, video, audio, PDFs, fonts, 3D models,
-//! G-code and archives come back as [`job::Preview::NeedsDecode`] carrying the
-//! kind, the path, the size the pane wants and any thumbnail the shared cache
-//! already holds; df-app puts dv-media, pdfium and ttf-parser behind that one
-//! variant. The split is PLAN §1's — this crate is tested on a machine with no
-//! display and no ffmpeg — and it is the reason the preview *decisions* are
+//! G-code, archives and Office files come back as
+//! [`job::Preview::NeedsDecode`] carrying the kind, the path, the size the pane
+//! wants and any thumbnail the shared cache already holds; df-app puts
+//! dv-media, pdfium, ttf-parser and its own readers behind that one variant.
+//! The split is PLAN §1's — this crate is tested on a machine with no display
+//! and no ffmpeg — and it is the reason the preview *decisions* are
 //! provable while the pixels are still a separate problem.
 //!
 //! What df-core does render itself is everything that is only ever text or

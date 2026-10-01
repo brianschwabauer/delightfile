@@ -248,9 +248,36 @@ fn sniff_ogg(head: &[u8]) -> Option<&'static str> {
     Some("audio/ogg")
 }
 
-/// Zip, and the two formats that are a zip with a fixed first member. epub is
-/// worth separating because it previews; docx and friends are not, since they
-/// go to an opener either way.
+/// What a zip is called once its first member says it is an Office Open XML
+/// package and nothing yet says which of the three: not a registered type, but
+/// the prefix [`super::kind`] maps to [`super::PreviewKind::Office`], which is
+/// all the preview needs. Which of Word, PowerPoint and Excel it is, df-app
+/// finds from the parts inside.
+pub const OOXML_MIME: &str = "application/vnd.openxmlformats-officedocument";
+
+/// The three types a name can give an Office Open XML package, which are kept
+/// over [`OOXML_MIME`] when the bytes agree (see [`sniff_or_hint`]).
+const OOXML_HINTS: &[&str] = &[
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
+
+/// The part every Office Open XML package carries, naming the content type of
+/// each of its other parts.
+const CONTENT_TYPES: &[u8] = b"[Content_Types].xml";
+
+/// Zip, and the formats that are a zip with a telling first member.
+///
+/// epub is worth separating because it goes to its opener rather than its
+/// listing. An Office Open XML package — a `.docx`, `.pptx` or `.xlsx` — is
+/// worth separating because it previews as the text it carries rather than as
+/// a list of XML files. Word, PowerPoint and Excel write its
+/// `[Content_Types].xml` first, and the first local header's name sits at a
+/// fixed offset (30, after a length at 26), so the first 8 KiB settle it with
+/// no index read. A package whose writer put that part somewhere else —
+/// LibreOffice writes it last — has nothing in its head to tell it from any
+/// other zip, and sniffs as one.
 fn sniff_zip(head: &[u8]) -> Option<&'static str> {
     if !head.starts_with(b"PK\x03\x04")
         && !head.starts_with(b"PK\x05\x06")
@@ -261,7 +288,17 @@ fn sniff_zip(head: &[u8]) -> Option<&'static str> {
     if starts_with(head, 30, b"mimetypeapplication/epub+zip") {
         return Some("application/epub+zip");
     }
+    if head.starts_with(b"PK\x03\x04") && first_member(head) == Some(CONTENT_TYPES) {
+        return Some(OOXML_MIME);
+    }
     Some("application/zip")
+}
+
+/// The name in the local header at the very front of a zip, when the head
+/// holds all of it.
+fn first_member(head: &[u8]) -> Option<&[u8]> {
+    let len = u16::from_le_bytes([*head.get(26)?, *head.get(27)?]) as usize;
+    head.get(30..30 + len)
 }
 
 fn starts_with(head: &[u8], offset: usize, needle: &[u8]) -> bool {
@@ -329,17 +366,23 @@ pub fn looks_like_text(head: &[u8]) -> bool {
 /// The precedence is the whole point, so it is written out:
 ///
 /// 1. **A signature wins.** Bytes do not lie about what they are, and a
-///    `.txt` holding a JPEG is a JPEG.
+///    `.txt` holding a JPEG is a JPEG. The one signature that knows less than
+///    the name is an Office Open XML package's ([`OOXML_MIME`]): the bytes say
+///    "Word, PowerPoint or Excel" and a `.docx` says which, so a name that
+///    gives one of the three keeps it.
 /// 2. **Otherwise, if it reads as text**, keep the hint when the hint is
 ///    itself textual — that is how `main.rs` stays `text/rust` and gets syntax
 ///    highlighting instead of collapsing to `text/plain`. `.obj`, `.ply` and
 ///    `.gcode` are the shape of this rule too: text files whose *hint* is the
 ///    only thing that knows they get a turntable rather than a scrollback.
 /// 3. **Otherwise it is binary**, and a hint that names a binary format is
-///    still better than nothing: `.wmv` and `.docx` have no signature here but
+///    still better than nothing: `.wmv` and `.doc` have no signature here but
 ///    the opener rules match on them.
 pub fn sniff_or_hint(head: &[u8], hint: &'static str) -> &'static str {
     if let Some(mime) = sniff(head) {
+        if mime == OOXML_MIME && OOXML_HINTS.contains(&hint) {
+            return hint;
+        }
         return mime;
     }
     let hint_is_text = crate::fs::mime::is_text(hint) || TEXTUAL_HINTS.contains(&hint);
@@ -516,6 +559,49 @@ mod tests {
         let mut zip = vec![0u8; 128];
         zip[..4].copy_from_slice(b"PK\x03\x04");
         assert_eq!(sniff(&zip), Some("application/zip"));
+    }
+
+    /// A zip whose first local header is named `name`, as a writer lays one
+    /// out: the length at 26, the name at 30.
+    fn zip_led_by(name: &[u8]) -> Vec<u8> {
+        let mut zip = vec![0u8; 30];
+        zip[..4].copy_from_slice(b"PK\x03\x04");
+        zip[26..28].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(b"<?xml version=\"1.0\"?><Types/>");
+        zip
+    }
+
+    #[test]
+    fn an_office_package_is_a_zip_led_by_its_content_types() {
+        let docx = zip_led_by(b"[Content_Types].xml");
+        assert_eq!(sniff(&docx), Some(OOXML_MIME));
+
+        // Any other first member is a zip like any other — including the
+        // `_rels/.rels` a LibreOffice package starts with.
+        assert_eq!(sniff(&zip_led_by(b"_rels/.rels")), Some("application/zip"));
+        assert_eq!(
+            sniff(&zip_led_by(b"[Content_Types].xml.bak")),
+            Some("application/zip")
+        );
+        // A head cut inside the name says nothing about it.
+        assert_eq!(sniff(&docx[..40]), Some("application/zip"));
+    }
+
+    #[test]
+    fn an_office_package_keeps_the_name_that_says_which() {
+        let docx = zip_led_by(b"[Content_Types].xml");
+        for hint in OOXML_HINTS {
+            assert_eq!(sniff_or_hint(&docx, hint), *hint);
+        }
+        // A name that says nothing, or something else, gets the family.
+        assert_eq!(sniff_or_hint(&docx, UNKNOWN_MIME), OOXML_MIME);
+        assert_eq!(sniff_or_hint(&docx, "application/zip"), OOXML_MIME);
+        // And a `.docx` that is a plain zip inside is a plain zip.
+        assert_eq!(
+            sniff_or_hint(&zip_led_by(b"notes.txt"), OOXML_HINTS[0]),
+            "application/zip"
+        );
     }
 
     #[test]
