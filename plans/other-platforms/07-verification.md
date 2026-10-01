@@ -375,6 +375,16 @@ workflow, launched by double-click from Explorer.
 - [ ] Breadcrumb shows drive roots as Phase 3 specified (`C:` then segments), the
       `Go to:` prompt accepts both `C:\Users` and `C:/Users`, the `~` shortcut goes
       to the user profile.
+- [ ] One separator (W4.46): after `g D` the breadcrumb, `Go to:`'s seed and a
+      pin made there say `C:\Users\<name>\Desktop`, never `…\<name>/Desktop`;
+      `Go to:` with `C:/Users/<name>/Documents`, `//host.lan/Data` and a path
+      typed with both separators goes there and shows it with `\` alone.
+- [ ] Icons without a Nerd Font (W4.42): no `/` before a folder's name; the
+      list, the grid at the top view step and the search panel's hits draw a
+      folder with a tab in its colour, a page in its kind's, a link's arrow
+      and a program's `▶`, crisp at 100 % and 125 %, the names where they
+      were; the Places card's drives, shares and "Connect to server…" have
+      their pictures, and an archive's preview header its mark.
 - [ ] Watch: create, delete, rename from Explorer and from PowerShell; each appears
       without refresh.
 - [ ] Watch (W4.4): a burst of a thousand files landing (an unzip in PowerShell)
@@ -430,6 +440,13 @@ workflow, launched by double-click from Explorer.
 ### 5.6 Preview
 - [ ] Same media list as macOS §4.6 with the DX12 backend; on the VM with WARP,
       note the frame rate but judge correctness only.
+- [ ] An SVG (W4.44): a drawing with a gradient, a path and words previews
+      as its picture, fitted to the pane, the words in a system face; not
+      "no decoder".
+- [ ] An Affinity file (W4.45): an `.afdesign` or `.af` with its thumbnail
+      previews as that picture with "embedded preview" in the corner; one
+      without is a card with its name, "Affinity … document", its size and
+      its dates, not a hexdump. (Linux too.)
 - [ ] Audio output through the default device; changing the default device
       mid-playback does not crash.
 
@@ -437,6 +454,17 @@ workflow, launched by double-click from Explorer.
 - [ ] Enter opens with the file association; `o` shows the Windows opener defaults;
       `terminal-at` opens Windows Terminal (or `cmd` when `wt` is absent) in the
       folder.
+- [ ] Enter is a double-click (W4.41): Enter on a picture, a text file, a
+      PDF, a zip and a file with no association does what Explorer's
+      double-click does (the last, "How do you want to open this?"); `O` on
+      each ends in "Open with…", which opens Windows' chooser for that file,
+      a name with spaces included; `O` lists only programs this machine has
+      (no Zed, no Chrome, no VS Code row where VS Code is not installed);
+      `O` on a folder offers Open in Explorer and Terminal here.
+- [ ] A font (W4.43): Enter on a `.ttf` installs it for this user, toasting
+      "Installed <family>", and the face is in Settings → Fonts and in
+      `%LOCALAPPDATA%\Microsoft\Windows\Fonts`; `O` offers "Preview in
+      Windows Font Viewer", which opens it there.
 - [ ] `M` drives card lists every drive with type and free space; eject a USB stick
       if Phase 4 implemented it.
 - [ ] SFTP through the built-in OpenSSH client (W4.20, W4.21): no console window
@@ -462,9 +490,13 @@ workflow, launched by double-click from Explorer.
 - [ ] A typed line (W4.3): `;notepad` opens Notepad with no console window
       beside it; in a share's folder `:cd > here.txt` writes `here.txt` there,
       and `M` lists no letter the line left mapped.
-- [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d`, `g w`, `g D` and `g o` go to
-      the user profile, `%APPDATA%`, Downloads, `Work`, the Desktop and
-      Documents; the which-key card lists those six and no server mounts.
+- [ ] The `g` bookmarks (W4.40, which replaced D5.11's six): `g h`, `g d`,
+      `g D`, `g o`, `g p`, `g v`, `g m`, `g c` and `g a` go to the profile,
+      Downloads, Desktop, Documents, Pictures, Videos, Music (where the shell
+      says each is, OneDrive's included), `C:\` and `%APPDATA%`; the which-key
+      card lists them as "Home · C:\Users\<name>" and so on, no `~`, no `g w`
+      and no server; the help sheet lists the same; `g /` opens the Places
+      card, whose Places say Home and AppData by name with their paths.
 
 ### 5.8 Runs
 
@@ -567,6 +599,86 @@ release zip is run.
   `recycle-me.txt` pasted onto the Desktop, then `u`'s words; `pack.7z` and
   `pack.tar.bz2` listed in the preview with no console window, and whether
   7-Zip is on the VM at all; `;notepad` in the share as before.
+- 2026-10-01, the polish agent (`port/windows-polish`, W4.40–W4.46) — the
+  same VM, which was at its lock screen (`winpolish/shots/00-lock-screen.jpg`
+  in the agent's scratchpad) until the container was restarted; it came
+  back signed in. Builds put in the share as `delightfile\polish-<sha>\`,
+  sample files in `delightfile\polish-scratch\` (an SVG with a gradient, a
+  path and words; `Sample Design.afdesign`, a synthetic Affinity file whose
+  header points at a 512×300 thumbnail with a larger 900×600 picture placed
+  before it; `No Thumbnail.af`, the signature and noise; `Hack-Regular.ttf`,
+  egui's face; `notes with space.txt`; `a folder`). Screenshots in
+  `winpolish/shots/`. Hack Regular is installed for `admin` now
+  (`%LOCALAPPDATA%\Microsoft\Windows\Fonts\Hack-Regular.ttf`), by W4.43's
+  check; nothing else on the VM was changed.
+  - Run 36905030633 (e02d7c7), opened from the share with no Run prompt:
+    - W4.42: no `/` anywhere; the parent column's folders are drawn
+      folders in blue, the DLLs pages with `▶` in green, an SVG and the
+      Affinity files pages in mauve, the font's in sky (`01-…`).
+    - W4.40: `g` brings up the which-key card with `h Home ·
+      C:\Users\admin`, `d Downloads · C:\Users\admin\Downloads`, `D`, `o`,
+      `p`, `v`, `m` the same, `c Drive C:\`, `a AppData ·
+      C:\Users\admin\AppData\Roaming`, `/ Places: drives and network`, and
+      no `w` and no server (`02-…`); clicking its `D` row went to the
+      Desktop, the breadcrumb `C: › Users › admin › Desktop` (`03-…`);
+      `g a` went to `C:\Users\admin\AppData\Roaming`.
+    - W4.46: `Go to:` opened from the last crumb there seeded
+      `C:\Users\admin\Desktop`, every separator `\` (`04-…`); typed
+      `//host.lan/data/delightfile/polish-scratch` it went to
+      `\\host.lan\data › delightfile › polish-scratch` (`05-…`).
+    - W4.44: `logo.svg` previewed as its picture — the gradient, the
+      triangle and "delightfile" in Segoe UI — not "no decoder" (`06-…`).
+    - W4.45: `Sample Design.afdesign` previewed as its thumbnail (the
+      gradient and the white disc, not the larger green picture placed
+      before it) with "embedded preview" in the corner (`09-…`); `No
+      Thumbnail.af` as its card: the name, "Affinity document", 9.0 KB,
+      "Modified 2026-10-01 13:14", "Created 2026-10-01 13:14" (`08-…`).
+    - W4.43: Enter on `Hack-Regular.ttf`, and the menu's Open with ▸
+      install-font, each made a task "Install Hack Regular" that ended
+      done (`13-…`), and the font was not in
+      `C:\Users\admin\AppData\Local\Microsoft\Windows\Fonts` (`14-…`);
+      Explorer's menu on the same file offers Install (`17-…`).
+    - The row menu's Open with ▸ lists the openers by their ids
+      (`install-font`, `font-viewer`, `open-with`; `11-…`), as on Linux
+      (`zed`, `edit`); the `O` picker has the descriptions (04 Open
+      questions).
+    - No toast was seen: not after the installs, not after `u` with nothing
+      to undo, `g r` outside a repository or `c c` (`15-…`, `16-…`).
+    - Incident: OneDrive's "Turn On Windows Backup" notification came up
+      over the window (`07-…`); it was closed with its ×, nothing chosen.
+  - Run 36911202413 (0c93a72, the verb's apartment kept and pumped):
+    - `u` with nothing to undo toasted "Nothing to undo" while the pointer
+      moved over the window (`18-…`): a toast is drawn in a frame input
+      brings, and was missed before by waiting with the window left alone
+      (04 Open questions).
+    - W4.43: Enter on the font, task done, still no Hack Regular in the
+      per-user Fonts folder (`19-…`, `20-…`).
+    - W4.40: `g /` opened the Places card: Windows (C:) under Devices,
+      "nothing mounted" and "Connect to server…" under Network, and Home,
+      Downloads, Desktop, Documents, Pictures, Videos, Music, C: and AppData
+      under Places, each by name with its path and its chord (`21-…`).
+    - W4.41: Enter on `notes with space.txt` opened it in Notepad (`24-…`);
+      its Open with ▸ offered open, notepad and open-with — this VM has no
+      VS Code or Notepad++ — (`22-…`), and a folder's explorer and
+      terminal-here (`25-…`). open-with, then `rundll32
+      shell32.dll,OpenAs_RunDLL`, put up no chooser (`23-…`).
+  - Run 36914607187 (6478f43, the verb found through the item's menu and
+    allowed its dialogs; Open with… the `openas` verb):
+    - W4.43: Enter on `Hack-Regular.ttf` toasted "Installed Hack Regular"
+      (`27-…`), and `Hack-Regular.ttf` is in
+      `C:\Users\admin\AppData\Local\Microsoft\Windows\Fonts`, 32 files
+      where there were 31 (`28-…`). No dialog came up.
+    - W4.41: open-with on `notes with space.txt` still put up no chooser,
+      nothing behind the window either (`26-…`); Explorer's own Open with ▸
+      Choose another app on the same file put up "Select an app to open
+      this .txt file", Notepad the default, with Always and Just once
+      (`29-…`), closed with Esc.
+  - Run 36917221800 (b2989b8, Open with… `SHOpenWithDialog`):
+    - W4.41: open-with on `notes with space.txt` put up "Select an app to
+      open this .txt file" over the window, Notepad the default, Windows
+      Media Player Legacy under More options, and Just once with no Always
+      (`30-…`); Esc closed it, no toast, the window answering the pointer
+      at once (`31-…`).
 
 ## 6. Release gate
 

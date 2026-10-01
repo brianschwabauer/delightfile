@@ -28,8 +28,12 @@ Factual basis: `appendix-inventory-df-core.md` §2 `config`, `state`, `zoxide`,
   W4.3). The default tables below are written in each platform's form.
 - **The shipped rule table is Brian's on Linux and generic elsewhere.** Linux keeps
   delightviewer, pinta, the `system-cmd-*` helpers and the `/mnt/schwabserverroot`
-  bookmarks. macOS and Windows ship only what a fresh machine has, plus `zed` if
-  installed (its absence is the ordinary "opener not found" toast).
+  bookmarks. macOS ships only what a fresh machine has, plus `zed` if
+  installed (its absence is the ordinary "opener not found" toast). Windows'
+  is a Windows user's (Brian, 2026-10-01, `04-windows.md` §13): Enter does
+  what a double-click in Explorer does, `O` offers what this machine has and
+  ends in "Open with…", and the bookmarks are the profile, the known folders,
+  the system drive and `%APPDATA%`.
 - **Cmd is Ctrl on macOS** (M2.20) with the override table in §3. Windows keymap
   is identical to Linux.
 
@@ -92,30 +96,72 @@ Dropped on macOS: `delightviewer`, `delightviewer-edit`, `set-wallpaper`,
 `optimize-avif` (no such binaries). `TERMINAL_APP` is a delightfile-only variable
 because `$TERMINAL` names a binary on Linux and `open -a` wants an app name.
 
-### 2.2 Windows openers (argv strings, `$1`/`$@`/`$dir`, W4.3)
+### 2.2 Windows openers (argv strings, `$1`/`$@`/`$dir`, W4.3, W4.41)
 
-| id | command | block | description |
+**Enter does what a double-click in Explorer does** (Brian, 2026-10-01):
+`builtin:shell-open`, the system's default app, is every file's first
+opener but a font's, whose is the shell's `install` verb (W4.43). `O`
+offers the alternatives below that this machine has, and every file's list
+ends in "Open with…". A row's commands are its candidates, best first: the
+first whose program is on `PATH` (as `.exe`, as itself, or as `.cmd`) or
+registered in `App Paths` (and then run by the registered path) is the row,
+and a row with none of them is not shipped, so no rule offers it (D5.4,
+W4.41). The splitter expands no environment variables (W4.3).
+
+| id | candidates | block | description |
 |---|---|---|---|
 | `open` | `builtin:shell-open` | — | Open |
-| `edit` | `code --wait "$@"`, else `notepad "$@"` (two candidates, the first on `PATH` when the table is built, D5.4; the splitter expands no environment variables, W4.3) | no | Edit |
-| `zed` | `zed "$@"` | no | Open in Zed |
-| `zed-workspace` | `zed "$1"` | no | Open folder in Zed |
-| `terminal-here` | `wt -d "$1"` when `wt` is on `PATH`, else `cmd /K cd /d "$1"` (two candidates, first found wins, D5.4) | no | Terminal here |
-| `terminal-at` | `wt -d "$dir"`, else `cmd /K cd /d "$dir"` | no | Terminal at file |
-| `open-in-chrome` | `chrome "$@"` — resolved on `PATH` only; when Chrome is installed but not on `PATH` the ordinary not-found toast appears and the person adds the full path in `delightfile.toml` | no | Open in Chrome |
-| `play` | `builtin:shell-open` | — | Play |
-| `bulk-rename` | `code --wait "$@"` else `notepad "$@"` | yes | Bulk rename |
+| `run` | `builtin:shell-open` | — | Run |
+| `open-with` | `builtin:shell-open-with` (`SHOpenWithDialog`, Explorer's "Choose another app") | — | Open with… |
+| `vscode` | `code "$@"` | no | Open in VS Code |
+| `notepad++` | `notepad++ "$@"` | no | Open in Notepad++ |
+| `notepad` | `notepad "$1"` | no | Open in Notepad |
+| `edit` | `code "$@"`, `notepad++ "$@"`, `notepad "$1"` | no | Edit |
+| `paint` | `mspaint "$1"` | no | Edit in Paint |
+| `mpv` | `mpv --force-window "$@"` | no | Play in mpv |
+| `vlc` | `vlc "$@"` | no | Play in VLC |
+| `7-zip` | `7zFM "$1"` | no | Open in 7-Zip |
+| `explorer` | `explorer "$1"` | no | Open in Explorer |
+| `terminal-here` | `wt -d "$1"`, `cmd /K cd /d "$1"` | no | Terminal here |
+| `terminal-at` | `wt -d "$dir"`, `cmd /K cd /d "$dir"` (no rule names it; a `[[open.rules]]` row may) | no | Terminal at file |
+| `install-font` | `builtin:font-install` | — | Install |
+| `font-viewer` | `builtin:shell-open` | — | Preview in Windows Font Viewer |
+| `bulk-rename` | `code --wait "$@"`, `notepad "$@"` | yes | Bulk rename |
 | `extract*` | `builtin:*` | — | unchanged |
+
+Gone from Windows' table (W4.41): `zed`, `zed-workspace` (the folder's VS
+Code row replaces it), `open-in-chrome` (a browser is `.html`'s default app
+already), `play` and `edit-image`.
 
 ### 2.3 Rules
 
-macOS and Windows use the Linux `DEFAULT_RULES` table row for row, with `open`
+macOS uses the Linux `DEFAULT_RULES` table row for row, with `open`
 (the system's default app) where a row names `delightviewer`, the other dropped
-openers (`delightviewer-edit`, `set-wallpaper`, `optimize-avif`, and on Windows
-`edit-image`, which becomes `open`) left out, and an `open` a row would name
-twice named once. The `text/*` rule keeps `zed, edit, open, terminal-at`.
-(Brian, 2026-09-29: this replaces "minus the rows that name a dropped opener",
-which took pictures, video, sound and PDFs down to the fallback row.)
+openers (`delightviewer-edit`, `set-wallpaper`, `optimize-avif`) left out, and
+an `open` a row would name twice named once. The `text/*` rule keeps `zed,
+edit, open, terminal-at`. (Brian, 2026-09-29: this replaces "minus the rows
+that name a dropped opener", which took pictures, video, sound and PDFs down
+to the fallback row.)
+
+Windows (Brian, 2026-10-01, W4.41), top-down, each list `O`'s order, the
+first what Enter runs:
+
+| match | openers |
+|---|---|
+| `bulk-rename.txt` | `bulk-rename` |
+| `*.{ttf,otf,ttc}` | `install-font`, `font-viewer`, `open-with` |
+| `*.{exe,msi}` | `run`, `open-with` |
+| `*.{bat,cmd,ps1}` | `run`, `edit`, `open-with` |
+| `*.{stl,obj,ply,3mf}` | `open`, `open-with` |
+| `*.{gcode,gco}` | `open`, `vscode`, `notepad++`, `notepad`, `open-with` |
+| archives, by name and by type | `open`, `extract`, `extract-here`, `extract-merged`, `7-zip`, `open-with` |
+| `image/svg+xml` | `open`, `vscode`, `open-with` (Paint cannot read one) |
+| `image/*` | `open`, `paint`, `open-with` |
+| `video/*`, `audio/*` | `open`, `mpv`, `vlc`, `open-with` |
+| `application/pdf` | `open`, `open-with` |
+| `text/*`, and JSON, XML, JS, shell, YAML, TOML | `open`, `vscode`, `notepad++`, `notepad`, `open-with` |
+| `*/` (a folder's `O`) | `explorer`, `vscode`, `terminal-here` |
+| `*` | `open`, `open-with` |
 
 - [x] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
       (`config.rs`) reads them; the Linux tables are the existing constants
@@ -266,15 +312,26 @@ the README and for choosing defaults).
 
 ## 6. Bookmarks
 
-| Key | Linux (unchanged) | macOS | Windows |
+| Key | Linux (unchanged) | macOS | Windows (W4.40) |
 |---|---|---|---|
-| `g h` | `~` | `~` | `~` |
-| `g c` | `~/.config` | `~/.config` | `%APPDATA%` (shipped as `~/AppData/Roaming`) |
-| `g d` | `~/Downloads` | `~/Downloads` | `~/Downloads` |
-| `g w` | `~/Work` | `~/Work` | `~/Work` |
-| `g D` | — | `~/Desktop` | `~/Desktop` |
-| `g o` | — | `~/Documents` | `~/Documents` |
-| (others) | `/mnt/schwabserverroot…`, `sftp://showandtour1/2` | — | — |
+| `g h` | `~` | `~` | `%USERPROFILE%`, named Home |
+| `g c` | `~/.config` | `~/.config` | the system drive's root, `%SystemDrive%\` (`C:\`) |
+| `g a` | `/mnt/schwabserverroot/files/Projects` | — | `%APPDATA%`, named AppData |
+| `g d` | `~/Downloads` | `~/Downloads` | Downloads |
+| `g w` | `~/Work` | `~/Work` | — |
+| `g D` | — | `~/Desktop` | Desktop |
+| `g o` | — | `~/Documents` | Documents |
+| `g p` | `/mnt/schwabserverroot/plex` | — | Pictures |
+| `g v` | — | — | Videos |
+| `g m` | — | — | Music |
+| `g /` | — | — | the Places card (a keymap row, not a bookmark: `KEYMAP_OVERRIDES`) |
+| (others) | `s`, `1`, `2`: `/mnt/schwabserverroot`, `sftp://showandtour1/2` | — | — |
+
+Windows' known folders (Downloads to Music) are where `SHGetKnownFolderPath`
+says they are, so one moved or taken into OneDrive is found there, else
+under the profile. Each is written as Windows writes it, on the which-key
+card as "Downloads · C:\Users\admin\Downloads" and on the Places card by its
+name with its path beside it; a folder the machine cannot name is left out.
 
 - [x] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
       moved. Done when: `keymap/defaults.rs` reads it and tests pass.
@@ -371,12 +428,28 @@ the README and for choosing defaults).
   Found after the full `7z`, so a machine with both uses the one that reads
   everything; a machine with only `7za` extracts and writes 7z rather than
   falling to `tar.exe` for it. `tar.exe` for `bsdtar` was W4.2's, in Phase 1.
+- (polish) 2026-10-01 — §2.2, §2.3 and §6's Windows columns are Brian's
+  2026-10-01 tables (`04-windows.md` §13, W4.40, W4.41): Enter is the
+  double-click, `O` what this machine has, the bookmarks a Windows user's
+  places. D5.4's candidate rule changes with them: a row none of whose
+  programs is here is not shipped, where it shipped its last command; there
+  is no last command every machine has once VS Code, Notepad++, VLC and
+  7-Zip are rows of their own. A program found in `App Paths` and not on
+  `PATH` is run by its registered path, which `start` and Run reach it by and
+  `CreateProcess` does not. 05's opener principle is logged in 04's
+  Decisions log with the rows' details.
+- (polish) 2026-10-01 — `g /` is not a bookmark but a keymap row
+  (`KEYMAP_OVERRIDES`, `mount-manager`), Windows' alone: the brief named it
+  as Linux's way to the root, but Linux ships no `g /`, and none is added
+  there.
 
 ## Open questions
 
 - yazi's exact cache-dir suffix on macOS and Windows (verify at D5.1).
   Windows: `0` (Decisions log, 2026-09-29); macOS still to verify.
-- Whether `wt` should be the Windows terminal default (see `04-windows.md`).
+- Whether `wt` should be the Windows terminal default (see `04-windows.md`):
+  it is the first candidate of `terminal-here`, `cmd` the second, so a
+  machine without `wt` gets `cmd`.
 - Ghostty `-e` on macOS (see `02-macos.md`).
 - (df-app) D5.4: how a Windows opener row carries its two candidates, and which
   branch writes §2.2's table into df-core's `platform/windows/defaults.rs`

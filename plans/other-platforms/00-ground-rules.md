@@ -86,6 +86,11 @@ Note: `arboard` is already in `Cargo.lock` through egui-winit's default `clipboa
 feature, which df-app never uses; S1.20 turns that feature off. It is not an allowed
 direct dependency.
 
+One exception under the project's own rule, "rewriting is impractical": **resvg**
+0.48 (`text`, `memmap-fonts`), df-app's on macOS and Windows only
+(`[target.'cfg(not(target_os = "linux"))'.dependencies]`), to preview an SVG where
+the bundled FFmpeg has no librsvg (`04-windows.md` W4.44). Linux builds none of it.
+
 FFI that is a handful of functions (FSEvents, `clonefile`, `SHFileOperationW`,
 `ReadDirectoryChangesW`, `GetLogicalDrives`) is declared by hand in the platform
 module, the way `fs/inotify.rs` does today, and gets the same treatment: `unsafe`
@@ -226,6 +231,13 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
   read as x86_64 Linux, glibc's `long` fields gave bindgen layouts that
   Windows' 32-bit `c_long` fails at compile time, so the Windows run reads the
   FFmpeg headers as MSVC over a few C library headers of the script's own.
+- (polish) 2026-10-01 — resvg is allowed off Linux (§3): an SVG renderer —
+  XML and CSS, paths, gradients and filters rasterised, text shaped — is
+  what "rewriting is impractical" means, and the FFmpeg the Windows zip and
+  the macOS app carry has no librsvg, so without it an SVG there was "no
+  decoder". 28 crates join each of those two trees, 24 of them new to
+  `Cargo.lock`; Linux's tree is unchanged (`04-windows.md` Decisions log,
+  W4.44).
 
 ## Open questions
 

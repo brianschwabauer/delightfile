@@ -679,6 +679,114 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       end; the viewer failed before the rest of §5.1's W4.39 lines could be
       tried, so they are still to see.
 
+## 13. First hands-on round, 2026-10-01
+
+Brian's first session with the v0.1.0 zip on Windows found seven things that
+read as a Linux program on a Windows desk. The decisions are his (2026-10-01);
+the calls the brief left to the builder are in the Decisions log, marked
+`(polish)`. Branch `port/windows-polish`, from `main` at 849a416.
+
+- [x] **W4.40** The `g` chords are a Windows user's places: `g h` the profile
+      folder, named Home; `g d`, `g D`, `g o`, `g p`, `g v`, `g m` Downloads,
+      Desktop, Documents, Pictures, Videos and Music where
+      `SHGetKnownFolderPath` says they are (a Documents OneDrive took is found
+      in `OneDrive`), each else its folder under the profile; `g c` the
+      system drive's root (`%SystemDrive%\`, `C:\` when unset); `g a`
+      `%APPDATA%`, named AppData, where the config lives; `g /` the Places
+      card (`KEYMAP_OVERRIDES`, the mount-manager command), a Windows machine
+      having no root. `g w` and Brian's machines are gone. Each is written as
+      Windows writes it and said so on the which-key card ("Downloads ·
+      C:\Users\admin\Downloads") and the Places card (name, then path); a
+      place under home is shown whole on Windows wherever a list shows one
+      (`platform::os::HOME_AS_TILDE`). The seam's table is
+      `platform::defaults::bookmarks()`, and a `config::Bookmark` may carry
+      the name the Places card shows. Linux's table and lists are unchanged.
+      Done when: the runner pins the keys and paths and `g /`, and the VM
+      shows the which-key card and the Places card.
+      — done 33cf363 (with cbc9c25's test fixes), green on the runners at run
+      36905030633; the runner's known folders all answer from the shell
+      (`known::tests`). VM: §5.8.
+- [x] **W4.41** Enter does what a double-click in Explorer does: every file's
+      first opener is `builtin:shell-open`, text and archives included, and
+      `O` offers the alternatives this machine has and ends every file's list
+      in Windows' own "Open with…" (`builtin:shell-open-with`,
+      `SHOpenWithDialog`, the chooser Explorer's "Choose another app" shows;
+      `rundll32 shell32.dll,OpenAs_RunDLL` and then the shell's `openas`
+      verb showed nothing on the VM).
+      The table is 05 §2.2's Windows rows; a row none of whose programs is
+      here is not shipped, so `O` shows no dead choice, and a program
+      registered in `App Paths` rather than on `PATH` (Notepad++, VLC, 7-Zip)
+      is found and run by its registered path. Zed, the Zed workspace, Chrome
+      and the image editor are gone from Windows' table. Done when: the
+      runner pins the principle and the VM opens a file each way.
+      — done 73423cc, 63b0a90 and b2989b8, green at run 36917221800. VM:
+      §5.8.
+- [x] **W4.42** Without a Nerd Font the icon column is drawn, not
+      classified (`marks.rs`, `icons::paint`): a folder with a tab, a page
+      with its corner folded, the page with an arrow for a link and with `▶`
+      for something that runs, in the kinds' colours; the Places card's disk,
+      stick, phone, camera, server and plus, and the archive header's mark
+      and a locked member's padlock, which were blank or a key emoji. Each is
+      the Nerd Font picture's size and place, on whole pixels, scaling with
+      the font. With a Nerd Font the glyph is drawn exactly as before
+      (`with_a_nerd_font_the_icon_column_is_unchanged`, run here with
+      JetBrainsMono Nerd Font installed). Done when: the VM shows the column,
+      the grid and the Places card with no `/` and no blank.
+      — done e02d7c7, green at run 36905030633. VM: §5.8.
+- [x] **W4.43** Enter on a font (`*.{ttf,otf,ttc}`) installs it for this
+      user: `builtin:font-install`, the shell's `install` verb through
+      `ShellExecuteExW`, found in the item's shortcut menu as Explorer's is
+      (`SEE_MASK_INVOKEIDLIST`) and seen through on a task worker that keeps
+      its apartment and pumps its messages, toasting "Installed <family
+      style>" once the font is in a fonts folder, and failing the task with
+      why when it is not; where the verb is missing, the Font Viewer opens
+      instead and the toast says so.
+      `O` offers "Preview in Windows Font Viewer" and "Open with…". Done
+      when: the verb is seen on a Windows that has it, and the VM installs a
+      test font.
+      — done e4a11d6, 0c93a72 and 6478f43, green at run 36914607187. The
+      runner's Server image has no `.ttf` association at all (neither `open`
+      nor `install`), so its tests say so and skip. On the Windows 11 VM the
+      first two installed nothing, and 6478f43's put Hack Regular in
+      `%LOCALAPPDATA%\Microsoft\Windows\Fonts` and said "Installed Hack
+      Regular" (§5.8).
+- [x] **W4.44** An SVG previews on Windows and macOS: their FFmpeg has no
+      librsvg (BtbN's `--enable-*` list at `build/windows/ffmpeg.lock` has
+      none, where Arch's has `--enable-librsvg`), so `decode` fell through
+      to FFmpeg's `svg_pipe` with no decoder and said "no decoder".
+      `platform::svg::render` draws one with resvg 0.48 before FFmpeg is
+      tried, fitted to the pane, its words in the faces of
+      `platform::fonts::dirs`; on Linux it answers nothing and FFmpeg's
+      librsvg draws it as before. resvg is built off Linux only. Done when:
+      the runner draws an SVG with a path, a gradient and text.
+      — done bdfc829, green at run 36905030633
+      (`platform::svg::tests::a_drawing_with_a_path_a_gradient_and_text_is_a_picture`
+      on Windows and macOS). VM: §5.8.
+- [x] **W4.45** An Affinity document previews as the thumbnail it carries,
+      on every platform (Brian asked for Linux too): `df_core::preview::
+      affinity` follows the header to the `Thmb` record Affinity writes in
+      every save, and where there is none to follow scans the first 16 MiB
+      for the record and then for the largest well-formed PNG; the sniff
+      knows the signature (`00 FF 4B 41`) and the extensions name it
+      (`application/x-affinity`), so its kind is `PreviewKind::Affinity`,
+      decoded in df-app (`Full::Embedded`) with an "embedded preview" chip,
+      and a file with none is a card — its name, "Affinity Designer
+      document", its size and dates — where it was a hexdump. Done when:
+      unit tests over a synthetic file, and Brian's own `.af` and
+      `.afdesign` files.
+      — done 20ea4f3, green at run 36905030633. All seven of Brian's files in
+      `~/Windows` (Designer 1's `.afdesign`, Affinity 3's `.af`) gave their
+      thumbnail by the header's pointer. VM: §5.8. PSD's embedded thumbnail
+      is a follow-up, not done.
+- [x] **W4.46** A place a bookmark, a pin or `Go to:` names is written with
+      `\` alone on Windows (`df_core::path::native`): `g D` goes to
+      `C:\Users\admin\Desktop`, not `C:\Users\admin/Desktop`; `Go to:` reads
+      `C:/x`, `//server/share` and a mixed path the same way; a `[goto]`
+      row's which-key line says its path so. Linux and macOS keep the text as
+      typed. Done when: tests for `~/Desktop`, `C:/Users/x`, `//server/share`
+      and a mixed path, and the VM's breadcrumb after `g D`.
+      — done 6e4eac7, green at run 36905030633. VM: §5.8.
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.
@@ -1181,6 +1289,165 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   `terminate` made `SIGKILL`: with the job stopped first the test passes in
   0.13 s, and without the stop rclone leaves `big.bin.<hex>.partial` behind
   and the test fails.
+- (polish) 2026-10-01 — W4.40: the bookmarks are a function of the seam,
+  `platform::defaults::bookmarks() -> Vec<config::Bookmark>`, where they were
+  a constant, since a known folder's path is the shell's answer at start;
+  Linux's and macOS's are their constants, mapped. A `Bookmark` gains
+  `name: Option<String>`, the Places card's name for a row of the shipped
+  table where the folder's own would mislead (Home for the profile, whose
+  folder is the user's name; AppData for `AppData\Roaming`), `None` for
+  every `[goto]` row a person writes. The which-key line is "<name> · <path>"
+  for Windows' named rows and "Drive C:\" for `g c`. A known folder the
+  shell cannot name and that is not under the profile either is left out.
+- (polish) 2026-10-01 — W4.40: a place under home is shown whole on Windows
+  everywhere a list shows one, not only on the which-key card and the Places
+  card the brief named: `g space`, `z`, a tab's row in the finder and the
+  sync card's title go through the same `finder::shorten_home`, and one
+  place spelled two ways in two lists would be the inconsistency the round
+  is about. This replaces W4.11's `~\Work` in what is shown;
+  `platform::os::HOME_AS_TILDE` is the switch, `true` on Linux and macOS,
+  whose lists are unchanged. A pin is still written from `~` in the state
+  file (`finder::tilde`), so the file reads the same on every machine.
+- (polish) 2026-10-01 — W4.40: `g /` is Windows' row in `KEYMAP_OVERRIDES`
+  for the `mount-manager` command, "Places: drives and network". Linux and
+  macOS ship no `g /` (the brief took Linux's to go to the root; it does
+  not exist), and none is added there.
+- (polish) 2026-10-01 — W4.41, the principle, as Brian put it: Enter does
+  what a double-click in Explorer does, for every kind, archives and text
+  included — the brief's "archives: Extract… first" is read as the head of
+  `O`'s alternatives, after `open`, since Explorer's double-click on a zip
+  opens it as a folder and Enter there is that. A font is the exception the
+  brief makes (W4.43). Executables and scripts run through `run`, the same
+  `builtin:shell-open` under the word "Run", so `.ps1`'s Enter is whatever
+  Windows does with one (Notepad, by default) and `O` has `edit`.
+- (polish) 2026-10-01 — W4.41: Paint is not offered for an SVG, which it
+  cannot read; VS Code is, as the brief also said. `notepad` and `paint`
+  take `$1` only, their programs opening one file. `terminal-at` stays a row
+  no rule names, so a `[[open.rules]]` written for it still finds it; files'
+  rules end in "Open with…" instead.
+- (polish) 2026-10-01 — W4.41: D5.4's candidates are found on `PATH` or in
+  `App Paths` (`HKCU` then `HKLM`, `Software\Microsoft\Windows\CurrentVersion\
+  App Paths\<name>.exe`, `platform/windows/known.rs`), because Notepad++,
+  VLC and 7-Zip register themselves there and not on `PATH`, and a row
+  found only by `PATH` would be absent on nearly every machine that has
+  them. A row found there runs its program by the registered path, quoted,
+  since `CreateProcess` reads `PATH` and not the registry. A Store app's
+  execution alias under `WindowsApps` (the new Paint, Terminal) counts as
+  there.
+- (polish) 2026-10-01 — W4.41: "Open with…" was `rundll32
+  shell32.dll,OpenAs_RunDLL "$1"`, as the brief said, until the VM showed
+  it (§5.8): on 0c93a72's build, chosen on `notes with space.txt` in the
+  share, no chooser came up. Nor did one for the shell's `openas` verb
+  through `ShellExecuteW` on 6478f43's (`builtin:shell-open-with`,
+  63b0a90), while Explorer's own "Choose another app" on the same file put
+  up "Select an app to open this .txt file". It is `SHOpenWithDialog` now
+  (b2989b8), the function that chooser is, and on b2989b8's build it came
+  up and closed unanswered with no error. Why the first two showed nothing
+  was not found; `OpenAs_RunDLL` reading its quotes as part of the path is
+  a guess, and `openas` gave no error to toast. `SHOpenWithDialog` is modal and
+  waits to be answered, so it is put up from a thread of its own, with COM
+  and no owner window, and the window goes on; a failure in its first
+  250 ms is the window's toast, a close unanswered no error. It is asked
+  for Always as well as Just once (`OAIF_ALLOW_REGISTRATION |
+  OAIF_REGISTER_EXT | OAIF_EXEC`), as Explorer's has them; on the VM
+  Windows showed Just once alone, which is Windows' to decide.
+- (polish) 2026-10-01 — W4.42: the drawings are their own module,
+  `marks.rs`, rather than more of `glyphs.rs`: a glyph's stand-in is placed
+  in a line of text by its advance and baseline, a mark in an icon column by
+  a box. The box is the Nerd Font picture's, measured off JetBrainsMono Nerd
+  Font as egui draws it at 12.5 and 44 points: about an em wide from the
+  anchor, 0.84 em tall, centred on the anchor's middle as the picture's ink
+  is, which stands its foot on the name's baseline in a row. A grid tile's
+  mark is centred on the tile; the Nerd Font glyph there sits 0.2 em right of
+  centre (its picture is wider than its advance), and still does.
+- (polish) 2026-10-01 — W4.42: `icon_for` and the icon constructors lose
+  their `nerd` argument; an `Icon` always carries the face's glyph and its
+  `Mark`, and `icons::paint` chooses at the paint. The `ls -F` classifiers
+  are removed rather than kept "where text is the output": nothing outputs
+  an icon as text. The padlock on a locked archive member is drawn too,
+  where it was the key emoji, and the Places card always has its icon
+  column, so its empty line is indented to the names, as it was with a Nerd
+  Font.
+- (polish) 2026-10-01 — W4.43: `builtin:font-install` is `ShellExecuteExW`
+  with `SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS | SEE_MASK_INVOKEIDLIST`,
+  on the engine's micro lane, one job a font, the job's thread keeping its
+  apartment and pumping its messages until the font is in a fonts folder
+  (`platform::fonts::dirs`) under its file name, a process the verb started
+  has ended, or 30 s have passed. In is "Installed <family style>", the name
+  off the face (`preview::doc::font::facts`), its file name where it has
+  none; not in fails the task, "Windows was asked to install <name>, and
+  <n> s later it is not in a fonts folder", so the tasks panel keeps why
+  after the toast has gone. A missing verb (`ERROR_NO_ASSOCIATION`, `SE_ERR_NOASSOC`)
+  opens the Font Viewer: "Opened <name> in the Font Viewer: this Windows
+  has no Install for it". The portable half, `open::install_font`, is
+  df-app's; the platform gives `install_verb` and `INSTALLS_FONTS`.
+- (polish) 2026-10-01 — W4.43: the runner (GitHub's Windows Server image)
+  has no association for `.ttf` at all — `AssocQueryStringW` finds no
+  `open` and no `install`, and `install_font` there ends in "no program is
+  set to open it" — so the runner cannot show the verb; its tests print
+  what they find and skip the install, and the Windows 11 VM is where it is
+  seen (§5.8, 07 §5.7).
+- (polish) 2026-10-01 — W4.43, from the VM (§5.8): the first two forms
+  installed nothing, their tasks done and the font in no fonts folder,
+  while Explorer's own Install was on the file's menu. e4a11d6's call
+  returned and gave its apartment up at once, and the verb is a handler the
+  shell runs in the calling process, its work done through the thread's
+  messages; 0c93a72 kept the apartment and pumped, and still nothing.
+  6478f43 installed it: the verb looked for in the item's shortcut menu,
+  handlers included (`SEE_MASK_INVOKEIDLIST`), as Explorer's menu and
+  `FolderItem.InvokeVerb` find it, and `SEE_MASK_FLAG_NO_UI` no longer set,
+  under which a handler may do nothing rather than ask. Which of the two
+  did it was not separated — there is no Windows here to try one without
+  the other, and each VM build is a runner's round — so both are kept, and
+  the pumping with them.
+- (polish) 2026-10-01 — W4.44: the dependency rule's exception, logged as
+  `00-ground-rules.md` §3 asks: resvg 0.48 (`text`, `memmap-fonts`; no
+  `svgz`, raster images or fontconfig), an SVG renderer — an XML and CSS
+  parser, a path, gradient and filter rasteriser and a text shaper — being
+  what "rewriting is impractical" was written for. Under
+  `[target.'cfg(not(target_os = "linux"))'.dependencies]`, so Linux builds
+  none of it (`cargo tree -p df-app -i resvg` finds nothing there); 28 crates
+  join the Windows and the macOS tree each, 24 of them new to `Cargo.lock`.
+  The shared body is `platform/svg.rs`, compiled for macOS and Windows,
+  whose FFmpeg both lack librsvg; Linux's `platform::svg::render` answers
+  nothing and FFmpeg draws as before.
+- (polish) 2026-10-01 — W4.44: an SVG is drawn to fit the pane, enlarged as
+  well as shrunk (a raster is never enlarged), at most 8192 pixels a side; a
+  24-point icon fills the pane, as a vector can. Its words are set in the
+  faces of `platform::fonts::dirs`, loaded once a process and only for a
+  drawing with a `<text`, so an icon costs no font walk; fontdb's own generic
+  families stand (Arial, Times New Roman, Courier New), which Windows and
+  macOS both have.
+- (polish) 2026-10-01 — W4.45: the thumbnail is the `Thmb` record the
+  header's pointer (the `u64` at offset 24) leads to, not the largest PNG in
+  the file, as the brief had it. Read off Brian's seven files in `~/Windows`:
+  a document keeps the raster pictures placed in it as PNGs too, and two of
+  the seven had one larger than the thumbnail — a book cover's painting at
+  1023×1537 without the title beside the 320×512 thumbnail of the cover, one
+  logo of seven at 2733×570 beside the 512×300 sheet — so "largest" would
+  show a part of the document. The largest well-formed PNG is kept as the
+  last resort, where no record is found in the first 16 MiB. Following the
+  pointer reads only the thumbnail, so a large `.afphoto` costs a seek and a
+  few hundred kilobytes.
+- (polish) 2026-10-01 — W4.45: the card for a file with no thumbnail is a
+  new `Preview::Card` (what, name, size, modified, created) that df-core
+  makes from the entry, painted as the audio card's lines are; the caption
+  over a thumbnail is the kind badge's chip, "embedded preview", the words
+  the app has for a corner caption, there being no other derived-preview
+  caption to borrow. An Affinity file's kind is a picture's in the list
+  (`FileKind::Image`), and its openers are the fallback rule's on every
+  platform.
+- (polish) 2026-10-01 — W4.46: `df_core::path::native` is applied where a
+  place is written by a person or a table — `expand_home` (bookmarks, pins,
+  an SSH key file, whose `-i` is now `\`-separated on Windows), `Go to:`'s
+  `typed_path`, a `[goto]` row's which-key words — and nowhere a path is
+  read from the disk, which is already Windows'. A pin is still written with
+  `/` after `~` in the state file, as W4.11 has it.
+- (polish) 2026-10-01 — Not of the round: today's stable Rust deprecates
+  `AtomicUsize::fetch_update` for `try_update`, and the macOS and Windows
+  runners, on current stable, refused the one call in `app.rs` under
+  `-D warnings` — red on `main` since 849a416. It is a compare-and-swap loop
+  now (557a184), since Arch's 1.98 has no `try_update`.
 
 ## Open questions
 
@@ -1188,3 +1455,15 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
+- (polish, 2026-10-01) The row menu's Open with ▸ lists a file's openers by
+  their ids (`install-font`, `font-viewer`, `open-with`, `notepad`), where
+  `O`'s picker has their descriptions ("Install", "Preview in Windows Font
+  Viewer", "Open with…"); Linux's does the same (`zed`, `edit`), so it is
+  not of this round. Options: the descriptions in the menu on every
+  platform (a Linux change); friendlier Windows ids; leave it.
+- (polish, 2026-10-01) On the VM a toast is drawn only in a frame some input
+  brings: "Nothing to undo" and "Installed Hack Regular" showed when keys
+  or the pointer drove frames, and none showed while the window was left
+  alone, so a toast that comes from a worker after the input has stopped
+  waits for the next input. Seen on this branch's builds; whether `main`'s
+  does the same was not looked at, and nothing here touched the wake.
