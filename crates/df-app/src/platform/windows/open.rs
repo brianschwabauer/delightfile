@@ -195,19 +195,28 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
 /// shell's `install` verb (W4.43).
 pub const INSTALLS_FONTS: bool = true;
 
-/// How long a process the verb starts, when it starts one, is waited for.
+/// How long the verb is given to finish: its own process, when it starts
+/// one, and otherwise its work on this thread's apartment.
 const INSTALL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The shell's `install` verb on `path` — what Explorer's "Install" on a
 /// font does, which installs it for this user (into
 /// `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, no administrator asked) — run
-/// and waited for. `Ok(false)` when the file's type has no `install` verb
-/// (`SE_ERR_NOASSOC`, `ERROR_NO_ASSOCIATION`): nothing was done.
+/// and seen through: the thread keeps its apartment and pumps its messages
+/// until `done` says the font is in, the verb's process has ended, or
+/// [`INSTALL_WAIT`] has passed. `Ok(false)` when the file's type has no
+/// `install` verb (`SE_ERR_NOASSOC`, `ERROR_NO_ASSOCIATION`): nothing was
+/// done.
 ///
-/// Called on a task worker ([`crate::open::install_font`]): the verb may
-/// put up the shell's own "already installed — replace it?" and wait on it.
-pub fn install_verb(path: &Path) -> io::Result<bool> {
-    match shell_verb(path.as_os_str(), "install", INSTALL_WAIT) {
+/// The pumping is the point: the verb is a handler the shell runs in this
+/// process, on this thread, and it does its work through the thread's
+/// message queue after `ShellExecuteExW` returns — on the VM, a call that
+/// gave the apartment up at once (the first build of W4.43) installed
+/// nothing. Called on a task worker ([`crate::open::install_font`]): the
+/// verb may put up the shell's own "already installed — replace it?" and
+/// wait on it.
+pub fn install_verb(path: &Path, done: &dyn Fn() -> bool) -> io::Result<bool> {
+    match shell_verb(path.as_os_str(), "install", INSTALL_WAIT, done) {
         Ok(()) => Ok(true),
         Err(VerbError::NoVerb) => Ok(false),
         Err(VerbError::Io(error)) => Err(error),
@@ -221,13 +230,20 @@ enum VerbError {
     Io(io::Error),
 }
 
-/// `verb` on `target` through `ShellExecuteExW`, waited for: the call
-/// itself (`SEE_MASK_NOASYNC`, which a verb the shell runs in its own code
-/// needs for the work to be done when it returns), and a process the verb
-/// starts, up to `wait`. The shell's own error dialogs are off
-/// (`SEE_MASK_FLAG_NO_UI`): the window says what went wrong.
-fn shell_verb(target: &OsStr, verb: &str, wait: std::time::Duration) -> Result<(), VerbError> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NO_ASSOCIATION};
+/// `verb` on `target` through `ShellExecuteExW`, seen through: the call
+/// (`SEE_MASK_NOASYNC`), then this thread's apartment kept and its messages
+/// pumped until `done`, the end of a process the verb started, or `wait`.
+/// The shell's own error dialogs are off (`SEE_MASK_FLAG_NO_UI`): the window
+/// says what went wrong.
+fn shell_verb(
+    target: &OsStr,
+    verb: &str,
+    wait: std::time::Duration,
+    done: &dyn Fn() -> bool,
+) -> Result<(), VerbError> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_NO_ASSOCIATION, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
@@ -256,13 +272,20 @@ fn shell_verb(target: &OsStr, verb: &str, wait: std::time::Duration) -> Result<(
     let ok = unsafe { ShellExecuteExW(&mut info) } != 0;
     // SAFETY: read at once on the failing thread.
     let error = (!ok).then(|| unsafe { GetLastError() });
-    if ok && info.hProcess != 0 {
-        let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
-        // SAFETY: the process handle the call returned, waited on and then
-        // closed once.
-        unsafe {
-            WaitForSingleObject(info.hProcess, millis);
-            CloseHandle(info.hProcess);
+    if ok {
+        let start = std::time::Instant::now();
+        while !done() && start.elapsed() < wait {
+            // SAFETY: a handle the call returned, asked without waiting.
+            if info.hProcess != 0
+                && unsafe { WaitForSingleObject(info.hProcess, 0) } == WAIT_OBJECT_0
+            {
+                break;
+            }
+            pump(std::time::Duration::from_millis(50));
+        }
+        if info.hProcess != 0 {
+            // SAFETY: the process handle the call returned, closed once.
+            unsafe { CloseHandle(info.hProcess) };
         }
     }
     if com >= 0 {
@@ -273,6 +296,28 @@ fn shell_verb(target: &OsStr, verb: &str, wait: std::time::Duration) -> Result<(
         None => Ok(()),
         Some(code) if code == ERROR_NO_ASSOCIATION || info.hInstApp == 31 => Err(VerbError::NoVerb),
         Some(code) => Err(VerbError::Io(io::Error::from_raw_os_error(code as i32))),
+    }
+}
+
+/// This thread's messages, dispatched, for up to `wait` while none come.
+fn pump(wait: std::time::Duration) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG,
+        PM_REMOVE, QS_ALLINPUT,
+    };
+    let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: no handles to wait on, a timeout, every kind of input; it
+    // returns when one comes or the time is up.
+    unsafe { MsgWaitForMultipleObjects(0, std::ptr::null(), 0, millis, QS_ALLINPUT) };
+    // SAFETY: an all-zero `MSG` is a valid one to be filled; each message
+    // taken off this thread's queue is translated and handed to its window
+    // procedure, as any message loop does.
+    let mut message: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { PeekMessageW(&mut message, 0, 0, 0, PM_REMOVE) } != 0 {
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
     }
 }
 

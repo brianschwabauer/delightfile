@@ -88,38 +88,30 @@ pub enum FontInstall {
     Previewed,
 }
 
-/// How long, after the verb said yes, the font is looked for in a fonts
-/// folder before the answer is "asked" rather than "installed".
-const INSTALL_SEEN: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// `builtin:font-install` on one font, on a task worker: the platform's
-/// `install` verb ([`crate::platform::open::install_verb`]); where the
-/// file's type has none, its default program, the Font Viewer, instead
-/// ([`FontInstall::Previewed`]). After the verb the font is looked for in
-/// the fonts folders ([`crate::platform::fonts::dirs`]) under its own file
-/// name: found is [`FontInstall::Installed`], not within
-/// [`INSTALL_SEEN`] is [`FontInstall::Asked`].
+/// `install` verb ([`crate::platform::open::install_verb`]), seen through
+/// until the font is in a fonts folder ([`crate::platform::fonts::dirs`])
+/// under its own file name — [`FontInstall::Installed`] — or the verb is
+/// over without it — [`FontInstall::Asked`]; where the file's type has no
+/// such verb, its default program, the Font Viewer, instead
+/// ([`FontInstall::Previewed`]).
 pub fn install_font(path: &std::path::Path) -> std::io::Result<FontInstall> {
-    if !crate::platform::open::install_verb(path)? {
+    let installed = || {
+        path.file_name().is_some_and(|name| {
+            crate::platform::fonts::dirs()
+                .iter()
+                .any(|dir| dir.join(name).is_file())
+        })
+    };
+    if !crate::platform::open::install_verb(path, &installed)? {
         shell_open(path.as_os_str())?;
         return Ok(FontInstall::Previewed);
     }
-    let Some(name) = path.file_name() else {
-        return Ok(FontInstall::Asked);
-    };
-    let start = std::time::Instant::now();
-    loop {
-        if crate::platform::fonts::dirs()
-            .iter()
-            .any(|dir| dir.join(name).is_file())
-        {
-            return Ok(FontInstall::Installed);
-        }
-        if start.elapsed() >= INSTALL_SEEN {
-            return Ok(FontInstall::Asked);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    Ok(if installed() {
+        FontInstall::Installed
+    } else {
+        FontInstall::Asked
+    })
 }
 
 use df_core::config::{Config, Opener};

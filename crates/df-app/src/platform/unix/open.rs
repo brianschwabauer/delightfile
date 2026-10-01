@@ -103,7 +103,7 @@ pub const INSTALLS_FONTS: bool = false;
 
 /// The shell's `install` verb, which Windows has and this platform has not:
 /// unsupported ([`INSTALLS_FONTS`]).
-pub fn install_verb(_path: &Path) -> std::io::Result<bool> {
+pub fn install_verb(_path: &Path, _done: &dyn Fn() -> bool) -> std::io::Result<bool> {
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
