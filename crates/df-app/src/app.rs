@@ -20630,12 +20630,15 @@ fn nearest_existing(path: &Path) -> PathBuf {
 /// rather than one with `..` in the middle of it.
 ///
 /// A separator is the platform's: on Windows `~\x` is `~/x`, `C:/x` is
-/// `C:\x`, `\\server\share` is a share, and a drive typed alone, `D:`, is
-/// that drive's root rather than the folder Windows last had open on it —
-/// which a window that has never been there cannot know.
+/// `C:\x`, `\\server\share` and `//server/share` are a share, every `/` is
+/// written `\` in what is gone to ([`df_core::path::native`], W4.46), and a
+/// drive typed alone, `D:`, is that drive's root rather than the folder
+/// Windows last had open on it — which a window that has never been there
+/// cannot know.
 fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     use std::path::Component;
-    let text = text.trim();
+    let text = df_core::path::native(text.trim());
+    let text = text.as_ref();
     let expanded = match (text.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home.to_path_buf(),
         (Some(rest), Some(home)) if rest.starts_with(std::path::is_separator) => {
@@ -22016,6 +22019,16 @@ mod tests {
         );
         assert_eq!(go(r"..\photos"), PathBuf::from(r"C:\Users\me\photos"));
         assert_eq!(go("app/lib"), PathBuf::from(r"C:\Users\me\src\app\lib"));
+
+        // …and what is gone to is written with `\` alone, which a path's
+        // equality does not see (it compares components) and its text does
+        // (W4.46): the breadcrumb, the history and a pin are made from it.
+        let text = |typed: &str| go(typed).to_string_lossy().into_owned();
+        assert_eq!(text("~/Desktop"), r"C:\Users\me\Desktop");
+        assert_eq!(text("C:/Users/x"), r"C:\Users\x");
+        assert_eq!(text("//server/share"), r"\\server\share");
+        assert_eq!(text("//server/share/docs"), r"\\server\share\docs");
+        assert_eq!(text(r"C:\Users/x\y/z"), r"C:\Users\x\y\z", "a mixed path");
     }
 
     #[test]

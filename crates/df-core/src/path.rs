@@ -367,20 +367,43 @@ pub fn display(p: &Path) -> String {
 
 /// A place as a person writes one — `~/Work`, `~\Work`, `/mnt/x`,
 /// `sftp://host/srv` — with a leading `~` replaced by the home directory
-/// ([`platform::dirs::home`]: `$HOME`, or `%USERPROFILE%` on Windows). The
-/// rest is kept as typed, separator and all, so a `~/Work` written on Linux
-/// names `C:\Users\x/Work` on Windows, which is the same folder. Unchanged
-/// when there is no home, or no `~`.
+/// ([`platform::dirs::home`]: `$HOME`, or `%USERPROFILE%` on Windows), and
+/// the whole written with this platform's separator ([`native`]): a `~/Work`
+/// written on Linux names `C:\Users\x\Work` on Windows, and a `C:/Work`
+/// there is `C:\Work`. On Linux and macOS the text is kept as typed.
+/// Unchanged but for the separator when there is no home, or no `~`.
 ///
 /// The one rule for every `~`: `[goto]` bookmarks, pins, an SFTP key file.
 pub fn expand_home(text: &str) -> String {
     let Some(rest) = text.strip_prefix('~') else {
-        return text.to_string();
+        return native(text).into_owned();
     };
     match platform::dirs::home() {
-        Some(home) => format!("{}{}", home.to_string_lossy(), rest),
-        None => text.to_string(),
+        Some(home) => native(&format!("{}{}", home.to_string_lossy(), rest)).into_owned(),
+        None => native(text).into_owned(),
     }
+}
+
+/// A local path as this platform writes one: on Windows every `/` is a `\`
+/// — `C:/x` is `C:\x`, `//server/share` is the share `\\server\share`, a
+/// path typed with both is one with `\` — and on Linux and macOS, where `/`
+/// is the only separator and a `\` is part of a name, the text as it is. A
+/// URL (`sftp://host/srv`) is never a local path and keeps its `/`.
+///
+/// For what a person typed or a table wrote — a bookmark, a pin, `Go to:` —
+/// before it is shown or gone to, so `C:\Users\x/Desktop` is never on
+/// screen (`plans/other-platforms/04-windows.md` W4.46).
+pub fn native(text: &str) -> Cow<'_, str> {
+    native_with(text, std::path::MAIN_SEPARATOR)
+}
+
+/// [`native`] for a platform whose separator is `separator`, so the Windows
+/// rule is tested on every target.
+fn native_with(text: &str, separator: char) -> Cow<'_, str> {
+    if separator == '/' || !text.contains('/') || text.contains("://") {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace('/', &separator.to_string()))
 }
 
 /// `text` with this platform's separator written as `/`, for the formats
@@ -625,16 +648,45 @@ mod tests {
 
     #[test]
     fn a_leading_tilde_is_home_and_the_rest_is_kept_as_typed() {
-        assert_eq!(expand_home("/mnt/x"), "/mnt/x");
         assert_eq!(expand_home("sftp://h/srv"), "sftp://h/srv");
         let Some(home) = platform::dirs::home() else {
-            assert_eq!(expand_home("~/Work"), "~/Work", "no home, no change");
+            assert_eq!(expand_home("~"), "~", "no home, no change");
             return;
         };
         let home = home.to_string_lossy();
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(expand_home("~"), home);
-        assert_eq!(expand_home("~/Work"), format!("{home}/Work"));
+        assert_eq!(expand_home("~/Desktop"), format!("{home}{sep}Desktop"));
         assert_eq!(expand_home(r"~\Work"), format!(r"{home}\Work"));
+        if cfg!(unix) {
+            assert_eq!(expand_home("/mnt/x"), "/mnt/x");
+        }
+        if cfg!(windows) {
+            assert_eq!(expand_home("C:/Users/x"), r"C:\Users\x");
+            assert_eq!(expand_home("//server/share"), r"\\server\share");
+            assert!(
+                !expand_home("~/a/b").contains('/'),
+                "{}",
+                expand_home("~/a/b")
+            );
+        }
+    }
+
+    /// Windows' rule, on every target: each `/` of a local path is a `\`, a
+    /// URL keeps its own, and a path already written with `\` is left as it
+    /// is. Where `/` is the separator nothing changes.
+    #[test]
+    fn a_typed_path_takes_the_platforms_separator() {
+        let w = |text| native_with(text, '\\').into_owned();
+        assert_eq!(w("~/Desktop"), r"~\Desktop");
+        assert_eq!(w("C:/Users/x"), r"C:\Users\x");
+        assert_eq!(w("//server/share"), r"\\server\share");
+        assert_eq!(w(r"\\server\share\x"), r"\\server\share\x");
+        assert_eq!(w(r"C:\Users/x\y/z"), r"C:\Users\x\y\z", "a mixed path");
+        assert_eq!(w("sftp://host/srv"), "sftp://host/srv");
+        assert!(matches!(native_with(r"C:\x", '\\'), Cow::Borrowed(_)));
+        assert_eq!(native_with(r"~/a\b", '/'), r"~/a\b", "Unix keeps the text");
+        assert!(matches!(native_with("/a/b", '/'), Cow::Borrowed(_)));
     }
 
     #[test]

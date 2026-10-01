@@ -1175,10 +1175,12 @@ impl Config {
             let mut bookmarks = Vec::new();
             for entry in &goto.entries {
                 match entry.value.as_str() {
+                    // Said in the platform's separator, as it is gone to:
+                    // `C:/Work` is `C:\Work` on Windows' which-key card.
                     Some(path) => bookmarks.push(Bookmark {
                         key: entry.key.clone(),
                         path: path.to_string(),
-                        description: format!("Go to {path}"),
+                        description: format!("Go to {}", crate::path::native(path)),
                     }),
                     None => warnings.push(ConfigWarning::new(
                         file,
@@ -2942,7 +2944,10 @@ mod tests {
             description: String::new(),
         };
         let expanded = b.expanded_path();
-        assert!(expanded.ends_with("/Work"));
+        assert!(
+            expanded.ends_with(&format!("{}Work", std::path::MAIN_SEPARATOR)),
+            "{expanded}"
+        );
         assert!(!expanded.starts_with('~'));
         // A URL is left for the vfs to resolve.
         let b = Bookmark {
