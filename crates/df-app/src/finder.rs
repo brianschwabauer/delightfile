@@ -685,7 +685,17 @@ mod tests {
             Some(Path::new("/home/brian")),
         );
         let paths: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
-        assert_eq!(paths, vec!["~/Work", "/tmp", "~/Downloads", "/etc"]);
+        if cfg!(unix) {
+            assert_eq!(paths, vec!["~/Work", "/tmp", "~/Downloads", "/etc"]);
+        }
+        // Windows shows a place whole (W4.40), a bookmark's in its own
+        // separator (W4.46), and the history's as it was spelled.
+        if cfg!(windows) {
+            assert_eq!(
+                paths,
+                vec!["/home/brian/Work", "/tmp", r"\home\brian\Downloads", "/etc"]
+            );
+        }
         // The history's copy of `~/Work` won, so it is *not* wearing the
         // bookmark's label.
         assert_eq!(rows[0].label, "Work");
@@ -734,7 +744,14 @@ mod tests {
             None,
         );
         let paths: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
-        assert_eq!(paths, vec!["/srv/b", "/tmp", "/etc", "/work"]);
+        if cfg!(unix) {
+            assert_eq!(paths, vec!["/srv/b", "/tmp", "/etc", "/work"]);
+        }
+        // A pin's and a bookmark's in Windows' separator (W4.46), the
+        // history's as it was spelled.
+        if cfg!(windows) {
+            assert_eq!(paths, vec![r"\srv\b", r"\tmp", "/etc", r"\work"]);
+        }
     }
 
     /// `~` is only a prefix at a component boundary — `/home/brianne` is not

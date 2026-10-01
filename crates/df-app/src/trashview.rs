@@ -745,7 +745,9 @@ mod tests {
             item("b.txt", "/etc/b.txt", "2026-08-30T09:15:00"),
         ];
         let notes = notes(&items);
-        if !home.is_empty() {
+        // `~` where home is written so; Windows, which has no trash view,
+        // shows a place whole (W4.40).
+        if !home.is_empty() && cfg!(unix) {
             assert_eq!(notes.get("a.txt").map(String::as_str), Some("~/Work"));
         }
         assert_eq!(notes.get("b.txt").map(String::as_str), Some("/etc"));

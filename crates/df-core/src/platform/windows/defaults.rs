@@ -271,11 +271,7 @@ pub fn bookmarks() -> Vec<Bookmark> {
         }
     }
     let drive = system_drive(std::env::var("SystemDrive").ok().as_deref());
-    rows.push(Bookmark::row(
-        "c",
-        &drive,
-        &format!("Drive {}", drive.trim_end_matches('\\')),
-    ));
+    rows.push(Bookmark::row("c", &drive, &format!("Drive {drive}")));
     if let Some(appdata) = super::dirs::config_dir() {
         rows.push(named("a", &appdata, "AppData"));
     }

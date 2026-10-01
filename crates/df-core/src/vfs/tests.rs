@@ -741,7 +741,13 @@ fn key_path_expands_a_leading_tilde() {
     service.key_file = Some("~/.ssh/id_ed25519".into());
     let expanded = service.key_path().unwrap();
     assert!(!expanded.to_string_lossy().contains('~'), "{expanded:?}");
-    assert!(expanded.to_string_lossy().ends_with("/.ssh/id_ed25519"));
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(
+        expanded
+            .to_string_lossy()
+            .ends_with(&format!("{sep}.ssh{sep}id_ed25519")),
+        "{expanded:?}"
+    );
 
     service.key_file = Some("/abs/key".into());
     assert_eq!(service.key_path().unwrap(), PathBuf::from("/abs/key"));
@@ -775,7 +781,9 @@ fn the_ssh_command_line_is_exactly_what_the_design_promises() {
         .collect();
     let joined = args.join(" ");
     assert!(joined.contains("-p 2222"), "{joined}");
-    assert!(joined.contains("-i /k"), "{joined}");
+    // The key is a path, in the platform's separator (W4.46).
+    let key = crate::path::native("/k");
+    assert!(joined.contains(&format!("-i {key}")), "{joined}");
 }
 
 /// The real `ssh`, where there is one, run as a service runs it: found on

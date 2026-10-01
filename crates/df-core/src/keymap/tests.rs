@@ -176,9 +176,12 @@ fn goto_chords_index_the_bookmark_table() {
             "`{keys}` should be bookmark {i}"
         );
     }
-    // …and the one everybody presses actually goes to ~/Work.
-    assert_eq!(bookmarks[3].key, "w");
-    assert_eq!(bookmarks[3].path, "~/Work");
+    // …and on Linux and macOS the one everybody presses actually goes to
+    // ~/Work; Windows ships a Windows user's places instead (W4.40).
+    if cfg!(unix) {
+        assert_eq!(bookmarks[3].key, "w");
+        assert_eq!(bookmarks[3].path, "~/Work");
+    }
 }
 
 // ── Chords ──────────────────────────────────────────────────────────────────

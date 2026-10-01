@@ -2538,7 +2538,11 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(c.goto.len(), 2);
         assert_eq!(c.goto[1].key, "m");
-        assert_eq!(c.goto[1].description, "Go to /mnt");
+        // In the platform's separator, as it is gone to (W4.46).
+        assert_eq!(
+            c.goto[1].description,
+            format!("Go to {}", crate::path::native("/mnt"))
+        );
     }
 
     /// `[tags]` gives any tag a colour, by palette name or by hex, and a line

@@ -689,7 +689,10 @@ mod tests {
         let table = goto_table(&config, &pins, home);
         let keys: Vec<&str> = table.iter().map(|b| b.key.as_str()).collect();
         assert_eq!(keys, vec!["h", "w", "a", "b"]);
-        assert_eq!(table[2].description, "Go to /srv/a");
+        assert_eq!(
+            table[2].description,
+            format!("Go to {}", df_core::path::native("/srv/a"))
+        );
         assert_eq!(table[3].path, "~/b", "written as given");
     }
 
@@ -1032,8 +1035,12 @@ mod tests {
             config.goto = vec![bookmark("w", "/elsewhere/work")];
         });
         s.keys("g b");
+        let elsewhere = format!(
+            "g w is already {}",
+            df_core::path::native("/elsewhere/work")
+        );
         for (key, said) in [
-            ("w", "g w is already /elsewhere/work"),
+            ("w", elsewhere.as_str()),
             ("g", "g g is already Go to top"),
             ("space", "g Space is already Jump interactively"),
             ("ab", "ab is not a key — one key, like w or space"),
@@ -1101,7 +1108,15 @@ mod tests {
                 (s.full(&files.join("other")), "g o".to_string()),
                 (s.full(&files.join("sub")), String::new()),
                 ("sftp://box/srv".to_string(), "g s".to_string()),
-                ("~".to_string(), "g h".to_string()),
+                // `~` where home is written so, its whole path on Windows
+                // (W4.40).
+                (
+                    crate::finder::shorten_home(
+                        &df_core::platform::dirs::home().unwrap_or_default(),
+                        df_core::platform::dirs::home().as_deref()
+                    ),
+                    "g h".to_string()
+                ),
             ],
             "home is [goto]'s here, so there is no fallback row"
         );

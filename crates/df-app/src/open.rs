@@ -718,8 +718,12 @@ mod tests {
         let ids = |choices: &[Choice]| -> Vec<String> {
             choices.iter().map(|c| c.name.clone()).collect()
         };
-        let all = vec!["extract", "extract-here", "extract-merged", "open"];
-        assert_eq!(ids(&choices_for(&config, &file("photos.zip"))), all);
+        // The platform's list for an archive: Linux's and macOS's extract
+        // first, Windows' open first (W4.41); the three built-ins in both.
+        let all = ids(&choices_for(&config, &file("photos.zip")));
+        for builtin in ["extract", "extract-here", "extract-merged"] {
+            assert!(all.iter().any(|id| id == builtin), "{all:?}");
+        }
         assert_eq!(ids(&choices_for(&config, &file("a.7z"))), all);
         // No extension a rule names and no mime: matched as `backup.7z`.
         assert_eq!(ids(&choices_for(&config, &file("backup.7z.002"))), all);
@@ -727,15 +731,19 @@ mod tests {
         assert_eq!(ids(&choices_for(&config, &file("bundle.tar.gz.003"))), all);
 
         let choices = choices_for(&config, &file("photos-1.zip"));
-        assert_eq!(
-            ids(&for_archives(choices.clone(), 1)),
-            vec!["extract", "extract-here", "open"]
-        );
+        let single: Vec<String> = all
+            .iter()
+            .filter(|id| *id != "extract-merged")
+            .cloned()
+            .collect();
+        assert_eq!(ids(&for_archives(choices.clone(), 1)), single);
         assert_eq!(ids(&for_archives(choices, 2)), all);
-        assert_eq!(
-            choices_for(&config, &file("photos.zip"))[0].builtin(),
-            Some("extract")
-        );
+        if cfg!(unix) {
+            assert_eq!(
+                choices_for(&config, &file("photos.zip"))[0].builtin(),
+                Some("extract")
+            );
+        }
     }
 
     #[test]

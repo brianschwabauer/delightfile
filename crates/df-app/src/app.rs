@@ -22101,7 +22101,7 @@ mod tests {
         let text = |typed: &str| go(typed).to_string_lossy().into_owned();
         assert_eq!(text("~/Desktop"), r"C:\Users\me\Desktop");
         assert_eq!(text("C:/Users/x"), r"C:\Users\x");
-        assert_eq!(text("//server/share"), r"\\server\share");
+        assert_eq!(text("//server/share"), r"\\server\share\");
         assert_eq!(text("//server/share/docs"), r"\\server\share\docs");
         assert_eq!(text(r"C:\Users/x\y/z"), r"C:\Users\x\y\z", "a mixed path");
     }
