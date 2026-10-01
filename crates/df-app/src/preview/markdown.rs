@@ -75,6 +75,25 @@ pub enum Block {
     /// A blank line between blocks. Carried rather than dropped so the painter
     /// can space paragraphs the way the author wrote them.
     Gap,
+    /// A table: a header row (empty when the source has none, as a Word table
+    /// usually does not), body rows, and one alignment per column. Rows are
+    /// already rectangular — every row has `align.len()` cells, a short row
+    /// padded with empty cells and a long one cut — so the painter never has
+    /// to reconcile them.
+    Table {
+        align: Vec<Align>,
+        header: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
+}
+
+/// How a table column lines its cells up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
 }
 
 /// How many spaces of indentation make one list level.

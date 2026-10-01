@@ -630,6 +630,36 @@ fn md_block(
             }
             height + 3.0
         }
+        // Placeholder until the painter learns tables: each row as one line of
+        // cells. Replaced by the table painter in the same round.
+        markdown::Block::Table { header, rows, .. } => {
+            let mut y_row = y;
+            let head = (!header.is_empty()).then_some(header);
+            for row in head.into_iter().chain(rows.iter()) {
+                let mut spans: Vec<markdown::Span> = Vec::new();
+                for (i, cell) in row.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(markdown::Span {
+                            text: "   ".to_string(),
+                            style: markdown::Style::default(),
+                        });
+                    }
+                    spans.extend(cell.iter().cloned());
+                }
+                let galley = painter.layout_job(md_job(
+                    &spans,
+                    palette,
+                    alpha,
+                    content.width(),
+                    BODY,
+                    palette.subtext1,
+                ));
+                let height = galley.size().y;
+                painter.galley(egui::pos2(content.left(), y_row), galley, palette.subtext1);
+                y_row += height;
+            }
+            y_row - y
+        }
         markdown::Block::Paragraph(spans) => {
             let galley = painter.layout_job(md_job(
                 spans,
