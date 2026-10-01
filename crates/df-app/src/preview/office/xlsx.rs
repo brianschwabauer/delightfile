@@ -18,6 +18,7 @@
 //!
 //! **The table starts at the first row with anything in it**, and that row is
 //! its header — which is what the first filled row of nearly every sheet is.
+//! A sheet with a title in `A1` therefore shows that title as its header row.
 //! Trailing empty rows and columns are trimmed; empty rows between filled ones
 //! are kept, because there they are part of the layout somebody chose. Hidden
 //! sheets are read like any other: hidden is a view setting, not a secret.
@@ -176,7 +177,7 @@ fn sheet(xml: &str, strings: &[String]) -> Sheet {
                 // A row that does not say where it is follows the last one.
                 row = attr(attrs, "r")
                     .and_then(|r| r.trim().parse().ok())
-                    .unwrap_or(row + 1);
+                    .unwrap_or_else(|| row.saturating_add(1));
                 next_column = 0;
             }
             Event::Start { name: "c", attrs } => {
@@ -299,7 +300,10 @@ fn build(grid: &BTreeMap<u32, BTreeMap<usize, String>>) -> Option<Block> {
     let cells = |row: u32| -> Vec<Vec<Span>> { (0..width).map(|c| plain(text(row, c))).collect() };
     let align = (0..width)
         .map(|column| {
-            let filled: Vec<&str> = (top + 1..=bottom)
+            // `skip(1)` rather than `top + 1`: a header in the last row a
+            // sheet can have is still a header, with nothing under it.
+            let filled: Vec<&str> = (top..=bottom)
+                .skip(1)
                 .map(|row| text(row, column))
                 .filter(|text| !text.is_empty())
                 .collect();
@@ -313,7 +317,7 @@ fn build(grid: &BTreeMap<u32, BTreeMap<usize, String>>) -> Option<Block> {
     Some(Block::Table {
         align,
         header: cells(top),
-        rows: (top + 1..=bottom).map(cells).collect(),
+        rows: (top..=bottom).skip(1).map(cells).collect(),
     })
 }
 
@@ -468,6 +472,20 @@ mod tests {
         };
         assert_eq!(header, row(&["x", "2"]));
         assert_eq!(rows, vec![row(&["", "3"])]);
+    }
+
+    /// A row at the very last row number, then one that does not say where it
+    /// is: the second is the same row rather than one past the end.
+    #[test]
+    fn a_row_after_the_last_row_number_does_not_overflow() {
+        let data = r#"<row r="4294967295"><c r="A4294967295"><v>1</v></c></row><row><c r="B1"><v>2</v></c></row>"#;
+        let Block::Table { header, rows, .. } =
+            read(&workbook(&[("S", data.to_string())], &[]))[2].clone()
+        else {
+            panic!("no table");
+        };
+        assert_eq!(header, row(&["1", "2"]));
+        assert!(rows.is_empty());
     }
 
     #[test]
