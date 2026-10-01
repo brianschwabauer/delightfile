@@ -630,36 +630,11 @@ fn md_block(
             }
             height + 3.0
         }
-        // Placeholder until the painter learns tables: each row as one line of
-        // cells. Replaced by the table painter in the same round.
-        markdown::Block::Table { header, rows, .. } => {
-            let mut y_row = y;
-            let head = (!header.is_empty()).then_some(header);
-            for row in head.into_iter().chain(rows.iter()) {
-                let mut spans: Vec<markdown::Span> = Vec::new();
-                for (i, cell) in row.iter().enumerate() {
-                    if i > 0 {
-                        spans.push(markdown::Span {
-                            text: "   ".to_string(),
-                            style: markdown::Style::default(),
-                        });
-                    }
-                    spans.extend(cell.iter().cloned());
-                }
-                let galley = painter.layout_job(md_job(
-                    &spans,
-                    palette,
-                    alpha,
-                    content.width(),
-                    BODY,
-                    palette.subtext1,
-                ));
-                let height = galley.size().y;
-                painter.galley(egui::pos2(content.left(), y_row), galley, palette.subtext1);
-                y_row += height;
-            }
-            y_row - y
-        }
+        markdown::Block::Table {
+            align,
+            header,
+            rows,
+        } => md_table(painter, palette, content, y, align, header, rows, alpha),
         markdown::Block::Paragraph(spans) => {
             let galley = painter.layout_job(md_job(
                 spans,
@@ -762,6 +737,257 @@ fn md_block(
             height
         }
     }
+}
+
+/// Space either side of a table cell's text, except left of the first column:
+/// a table's text starts where the paragraph above it starts, so the left edge
+/// of the document stays one straight line.
+const CELL_PAD_X: f32 = 6.0;
+
+/// Space above and below a table cell's text. Half the horizontal padding,
+/// because the hairline between rows already keeps them apart, and every
+/// point here is paid again on every row of a long table.
+const CELL_PAD_Y: f32 = 3.0;
+
+/// The narrowest a column is squeezed to when a table is wider than the pane:
+/// about four ems, which still holds a short word or a number. Past this the
+/// table stops shrinking and is cut at the pane's right edge instead — nothing
+/// in the preview scrolls sideways, and a column one letter wide is unreadable
+/// in a way a cut-off column is not.
+const COLUMN_FLOOR: f32 = BODY * 4.0;
+
+/// The share of the pane one column may ask for. A column of sentences laid
+/// out on one line would be as wide as its longest sentence; capping it at half
+/// the pane is what leaves the columns beside it room to be read.
+const COLUMN_SHARE: f32 = 0.5;
+
+/// How many body rows the column widths are measured from.
+///
+/// A width is the widest cell in its column, and finding it means laying out
+/// every cell on one line. Two hundred rows is more than any table written by
+/// hand. Past them, a spreadsheet of five hundred rows by eight columns would
+/// be another two thousand four hundred one-line layouts for egui to make and
+/// then look up every frame, to learn widths the first two hundred rows have
+/// almost always settled — and a wider cell further down is not lost, it wraps
+/// inside the column it is given.
+const MEASURE_ROWS: usize = 200;
+
+/// Extra wrap width a cell is laid out with. egui rounds a measured width to a
+/// thirty-second of a point, which can land a hair under the text's real width,
+/// and a cell laid out at exactly its own measured width would then wrap its
+/// last word. A point is invisible and settles it.
+const WRAP_SLACK: f32 = 1.0;
+
+/// Fit a table's columns to the pane.
+///
+/// `natural` is each column's width with its text on one line, padding
+/// included; `available` is the pane's width. A column asks for its natural
+/// width, capped at [`COLUMN_SHARE`] of the pane. If what the columns ask for
+/// fits, that is what they get — a table is as wide as its content and does
+/// not stretch to fill the pane, so a two-column table of short values stays a
+/// compact block rather than two words a pane apart. If it does not fit, every
+/// column gives up the same fraction of what it asked for, except that none is
+/// squeezed below [`COLUMN_FLOOR`] (or below what it asked for, if that was
+/// less), the columns already at their floor dropping out of the sharing. If
+/// even the floors do not fit, the floors are returned, and the table runs off
+/// the pane's right edge, where the clip cuts it.
+fn column_widths(natural: &[f32], available: f32) -> Vec<f32> {
+    let available = available.max(0.0);
+    let cap = available * COLUMN_SHARE;
+    let asked: Vec<f32> = natural.iter().map(|w| w.max(0.0).min(cap)).collect();
+    if asked.iter().sum::<f32>() <= available {
+        return asked;
+    }
+    let floors: Vec<f32> = asked.iter().map(|w| w.min(COLUMN_FLOOR)).collect();
+    if floors.iter().sum::<f32>() >= available {
+        return floors;
+    }
+    // Shrink by one factor; any column that factor would take under its floor
+    // is pinned there, which leaves less for the rest, so the factor is worked
+    // out again. Each pass pins at least one more column or is the last, so
+    // this ends within one pass per column.
+    let mut pinned = vec![false; asked.len()];
+    loop {
+        let pinned_width: f32 = floors
+            .iter()
+            .zip(&pinned)
+            .filter(|(_, &pin)| pin)
+            .map(|(floor, _)| floor)
+            .sum();
+        let free: f32 = asked
+            .iter()
+            .zip(&pinned)
+            .filter(|(_, &pin)| !pin)
+            .map(|(width, _)| width)
+            .sum();
+        let scale = if free > 0.0 {
+            (available - pinned_width) / free
+        } else {
+            0.0
+        };
+        let mut pinned_more = false;
+        for ((pin, &width), &floor) in pinned.iter_mut().zip(&asked).zip(&floors) {
+            if !*pin && width * scale < floor {
+                *pin = true;
+                pinned_more = true;
+            }
+        }
+        if !pinned_more {
+            return asked
+                .iter()
+                .zip(&floors)
+                .zip(&pinned)
+                .map(|((&width, &floor), &pin)| if pin { floor } else { width * scale })
+                .collect();
+        }
+    }
+}
+
+/// Draw a table at `y` and return how tall it was.
+///
+/// Columns are fixed before any row is drawn ([`column_widths`]), so a cell's
+/// text wraps inside its column and a row is as tall as its tallest cell. The
+/// only lines are horizontal — a hairline under each row, a stronger one under
+/// the header — with no grid, border or plate: the columns' alignment already
+/// says where one stops and the next starts, and a grid of boxes in a pane
+/// this narrow would be more lines than text.
+#[allow(clippy::too_many_arguments)]
+fn md_table(
+    painter: &egui::Painter,
+    palette: &crate::theme::Palette,
+    content: egui::Rect,
+    y: f32,
+    align: &[markdown::Align],
+    header: &[Vec<markdown::Span>],
+    rows: &[Vec<Vec<markdown::Span>>],
+    alpha: f32,
+) -> f32 {
+    let columns = align.len();
+    if columns == 0 {
+        return 0.0;
+    }
+    let pad_left = |c: usize| if c == 0 { 0.0 } else { CELL_PAD_X };
+    let head = (!header.is_empty()).then_some(header);
+
+    // Natural widths, from one-line layouts. These are measured at full
+    // opacity in one colour whatever the cell's own, so the layouts are the
+    // same jobs every frame — a crossfade does not make egui lay the whole
+    // table out again just to learn widths that did not change.
+    let mut widest = vec![0.0f32; columns];
+    let measured = rows.iter().take(MEASURE_ROWS).map(Vec::as_slice);
+    for row in head.into_iter().chain(measured) {
+        for (c, cell) in row.iter().enumerate().take(columns) {
+            if cell.is_empty() {
+                continue;
+            }
+            let galley = painter.layout_job(md_job(
+                cell,
+                palette,
+                1.0,
+                f32::INFINITY,
+                BODY,
+                palette.subtext1,
+            ));
+            widest[c] = widest[c].max(galley.size().x);
+        }
+    }
+    let natural: Vec<f32> = widest
+        .iter()
+        .enumerate()
+        .map(|(c, w)| w + pad_left(c) + CELL_PAD_X)
+        .collect();
+    let widths = column_widths(&natural, content.width());
+    let right = (content.left() + widths.iter().sum::<f32>()).min(content.right());
+
+    // A blank cell draws nothing, but a row of them is still a row: it is one
+    // line tall, as it would be with a word in it, so a spreadsheet's empty
+    // separator row reads as space rather than as two hairlines touching.
+    let line = painter
+        .layout_no_wrap(
+            " ".to_owned(),
+            egui::FontId::proportional(BODY),
+            egui::Color32::TRANSPARENT,
+        )
+        .size()
+        .y;
+
+    let total = usize::from(head.is_some()) + rows.len();
+    let body = rows.iter().map(|row| (row.as_slice(), false));
+    let mut top = y;
+    let mut cells = Vec::with_capacity(columns);
+    for (index, (row, is_header)) in head.map(|h| (h, true)).into_iter().chain(body).enumerate() {
+        // As in `markdown_body`, what is more than a screenful below the pane
+        // is estimated rather than laid out, each row as one line: its exact
+        // height cannot matter until it is a screen nearer, and a spreadsheet
+        // can have thousands of cells down there.
+        if top > content.bottom() + content.height() {
+            top += (total - index) as f32 * (LINE + CELL_PAD_Y * 2.0 + 1.0);
+            break;
+        }
+        // egui has no bold face (see `md_job`), so the header is bold the way
+        // a `**span**` is: at `text`, a step brighter than the body.
+        let base = if is_header {
+            palette.text
+        } else {
+            palette.subtext1
+        };
+        cells.clear();
+        let mut tallest = line;
+        let mut left = content.left();
+        for (c, &width) in widths.iter().enumerate() {
+            let inner = (width - pad_left(c) - CELL_PAD_X).max(0.0);
+            let galley = row.get(c).filter(|cell| !cell.is_empty()).map(|cell| {
+                let mut job = md_job(cell, palette, alpha, inner + WRAP_SLACK, BODY, base);
+                // egui lines each wrapped row up against the galley's
+                // position — its left edge, centre or right edge — so a
+                // centred or right-aligned cell stays aligned line by line
+                // when it wraps.
+                job.halign = match align[c] {
+                    markdown::Align::Left => egui::Align::LEFT,
+                    markdown::Align::Center => egui::Align::Center,
+                    markdown::Align::Right => egui::Align::RIGHT,
+                };
+                painter.layout_job(job)
+            });
+            if let Some(galley) = &galley {
+                tallest = tallest.max(galley.size().y);
+            }
+            let text_left = left + pad_left(c);
+            let anchor = match align[c] {
+                markdown::Align::Left => text_left,
+                markdown::Align::Center => text_left + inner / 2.0,
+                markdown::Align::Right => text_left + inner,
+            };
+            cells.push((anchor, galley));
+            left += width;
+        }
+        let height = tallest + CELL_PAD_Y * 2.0;
+        // Rows above and below the pane are measured, since their heights are
+        // the scroll extent, but only those that show are painted.
+        if top + height + 1.0 >= content.top() && top <= content.bottom() {
+            for (anchor, galley) in cells.drain(..) {
+                if let Some(galley) = galley {
+                    painter.galley(egui::pos2(anchor, top + CELL_PAD_Y), galley, base);
+                }
+            }
+            let rule = if is_header {
+                palette.surface2
+            } else {
+                palette.surface1
+            };
+            let under = top + height;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(content.left(), under),
+                    egui::pos2(right, under + 1.0),
+                ),
+                0,
+                rule.gamma_multiply(alpha),
+            );
+        }
+        top += height + 1.0;
+    }
+    top - y
 }
 
 /// One block's inline spans as a wrapping layout job.
@@ -2038,6 +2264,50 @@ mod tests {
                 ),
                 truncated: true,
             },
+            // A pipe table under a paragraph: every alignment, a cell long
+            // enough to wrap, code with an escaped pipe, a row of blanks.
+            Body::Markdown {
+                blocks: markdown::parse(&format!(
+                    "intro\n| Name | Size | Note |\n| :--- | ---: | :---: |\n| a.txt | 12 | {} |\n| `x \\| y` | 3 |\n| | | |\n\nafter\n",
+                    "a sentence long enough to wrap ".repeat(12),
+                )),
+                truncated: false,
+            },
+            // What a spreadsheet hands the pane: no header, a numeric column
+            // set right, empty cells, and more rows and columns than fit —
+            // past the measured rows, past the screenful that is laid out,
+            // and wider than the pane at every column's floor.
+            Body::Markdown {
+                blocks: vec![markdown::Block::Table {
+                    align: (0..30)
+                        .map(|c| {
+                            if c % 3 == 1 {
+                                markdown::Align::Right
+                            } else {
+                                markdown::Align::Left
+                            }
+                        })
+                        .collect(),
+                    header: Vec::new(),
+                    rows: (0..500)
+                        .map(|r| {
+                            (0..30)
+                                .map(|c| {
+                                    if (r + c) % 7 == 0 {
+                                        Vec::new()
+                                    } else {
+                                        vec![markdown::Span {
+                                            text: (r * 31 + c).to_string(),
+                                            style: markdown::Style::default(),
+                                        }]
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                }],
+                truncated: false,
+            },
             Body::Directory {
                 entries: (0..80)
                     .map(|i| entry(&format!("file-{i}"), Kind::File))
@@ -2514,6 +2784,137 @@ mod tests {
                 encrypted: *encrypted,
             },
         }
+    }
+
+    fn widths_are(got: Vec<f32>, want: &[f32]) {
+        assert!(
+            got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-3),
+            "got {got:?}, want {want:?}"
+        );
+    }
+
+    /// Columns that fit are as wide as their content, and the table does not
+    /// stretch to the pane's width.
+    #[test]
+    fn columns_that_fit_keep_their_natural_widths() {
+        widths_are(
+            column_widths(&[60.0, 80.0, 40.0], 400.0),
+            &[60.0, 80.0, 40.0],
+        );
+        widths_are(column_widths(&[], 400.0), &[]);
+    }
+
+    #[test]
+    fn columns_too_wide_for_the_pane_shrink_by_one_factor() {
+        // The third column is capped at 200 first; then 500 into 400 is 0.8
+        // of each.
+        widths_are(
+            column_widths(&[100.0, 200.0, 300.0], 400.0),
+            &[80.0, 160.0, 160.0],
+        );
+    }
+
+    /// A column the shared factor would take under its floor stops there, and
+    /// the others give up what it could not.
+    #[test]
+    fn a_shrinking_column_stops_at_its_floor() {
+        assert_eq!(COLUMN_FLOOR, 52.0);
+        // 360 into 300 would make the first column 50.
+        widths_are(
+            column_widths(&[60.0, 200.0, 200.0], 300.0),
+            &[52.0, 124.0, 124.0],
+        );
+        // A column already narrower than the floor keeps its own width — the
+        // floor is how far a column shrinks, not how wide it must be.
+        widths_are(
+            column_widths(&[20.0, 600.0, 600.0], 300.0),
+            &[20.0, 140.0, 140.0],
+        );
+    }
+
+    /// When even the floors are wider than the pane, the floors are what the
+    /// columns get, and the clip cuts the table at the pane's edge.
+    #[test]
+    fn columns_whose_floors_do_not_fit_run_off_the_pane() {
+        widths_are(column_widths(&[100.0; 10], 300.0), &[52.0; 10]);
+        // A pane with no width at all is a table with none, not a NaN.
+        widths_are(column_widths(&[100.0, 0.0], 0.0), &[0.0, 0.0]);
+    }
+
+    /// One long column asks for at most half the pane, so it cannot starve
+    /// the columns beside it.
+    #[test]
+    fn one_column_asks_for_at_most_half_the_pane() {
+        widths_are(column_widths(&[40.0, 900.0], 400.0), &[40.0, 200.0]);
+    }
+
+    /// Run `paint` once with a frame's painter and the default palette.
+    fn with_painter(paint: impl FnOnce(&egui::Painter, &crate::theme::Palette)) {
+        let ctx = egui::Context::default();
+        let mut paint = Some(paint);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            if let Some(paint) = paint.take() {
+                paint(ui.painter(), &palette);
+            }
+        });
+    }
+
+    #[test]
+    fn a_table_is_as_tall_as_its_rows() {
+        use markdown::{Align, Span, Style};
+        let word = |text: &str| {
+            vec![Span {
+                text: text.to_string(),
+                style: Style::default(),
+            }]
+        };
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        with_painter(|painter, palette| {
+            let height = |header: &[Vec<Span>], rows: &[Vec<Vec<Span>>]| {
+                md_table(
+                    painter,
+                    palette,
+                    content,
+                    0.0,
+                    &[Align::Left, Align::Right],
+                    header,
+                    rows,
+                    1.0,
+                )
+            };
+            let one = height(&[], &[vec![word("a"), word("1")]]);
+            assert!(one > CELL_PAD_Y * 2.0 + 1.0, "{one}");
+            // A row of blanks is as tall as a row of words.
+            assert_eq!(height(&[], &[vec![Vec::new(), Vec::new()]]), one);
+            // A header is one more row.
+            let headed = height(&[word("h"), word("n")], &[vec![word("a"), word("1")]]);
+            assert!((headed - one * 2.0).abs() < 1e-3, "{headed} against {one}");
+            // A cell longer than its column wraps, and its row grows.
+            let long = "word ".repeat(80);
+            assert!(height(&[], &[vec![word(&long), word("1")]]) > one * 3.0);
+            // Rows more than a screenful below the pane are estimated at one
+            // line each rather than laid out. With rows three lines tall the
+            // two differ, so the height says where laying out stopped: every
+            // row as estimated, plus the extra of the ones laid out, which is
+            // those whose top is within the pane and a screenful below it.
+            let three = vec![word("1\n2\n3"), word("x")];
+            let row = height(&[], std::slice::from_ref(&three));
+            let estimate = LINE + CELL_PAD_Y * 2.0 + 1.0;
+            assert!(row > estimate * 2.0, "{row} against {estimate}");
+            let tall = height(&[], &vec![three; 5000]);
+            let laid_out = (content.height() * 2.0 / row).floor() + 1.0;
+            let want = 5000.0 * estimate + laid_out * (row - estimate);
+            assert!(
+                (tall - want).abs() <= row - estimate,
+                "{tall} for 5000 rows of {row}, want {want}"
+            );
+            // An empty table — no columns — takes no room.
+            assert_eq!(
+                md_table(painter, palette, content, 0.0, &[], &[], &[], 1.0),
+                0.0
+            );
+        });
     }
 
     #[test]
