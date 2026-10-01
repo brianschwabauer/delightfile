@@ -381,7 +381,7 @@ the workflow, so a human with the machine can produce the same artifact.
 ### 3.2 macOS (`build/macos/`)
 
 - [x] **B6.15** `build/macos/Info.plist` with `CFBundleIdentifier`
-      `com.showandtour.delightfile` (Brian's domain; change only if he says so),
+      `com.brianschwabauer.delightfile` (Brian's choice, 2026-10-01),
       `CFBundleExecutable delightfile`, `CFBundleName delightfile`,
       `CFBundleIconFile delightfile.icns`, `CFBundleShortVersionString` and
       `CFBundleVersion` filled from `Cargo.toml` at package time, `LSMinimumSystemVersion`
@@ -1005,6 +1005,10 @@ Why not sign now:
   now holds both of FFmpeg's files, as the macOS bundle does, and the entry
   above's "`COPYING.GPLv3.txt` only" no longer holds.
 
+- 2026-10-01 — Bundle identifier is `com.brianschwabauer.delightfile`, Brian's call;
+  the plan had `com.showandtour.delightfile`. Changed before any release carried the
+  old one, so no preferences path or notarization record ever held it.
+
 ## Open questions
 
 - Homebrew FFmpeg major on the macOS runner at implementation time (B6.7 resolves).
@@ -1039,8 +1043,6 @@ Why not sign now:
   a few days, and a new clippy lint under `-D warnings` would then fail one job and
   not the others. Should macOS and Windows pin the version Arch ships (for example
   `toolchain: 1.98`), and who bumps it?
-- Bundle identifier `com.showandtour.delightfile`: confirm with Brian before the first
-  release (it is baked into the notarization record and the app's preferences path).
 - (2026-09-30) Which macOS the release starts on. Built as it is now, it needs macOS
   26 (Decisions log), where B6.15 and B6.24 planned 13 (Ventura). The ways to lower
   it:

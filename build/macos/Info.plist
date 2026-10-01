@@ -23,7 +23,7 @@
 	<key>CFBundleIconFile</key>
 	<string>delightfile.icns</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.showandtour.delightfile</string>
+	<string>com.brianschwabauer.delightfile</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
