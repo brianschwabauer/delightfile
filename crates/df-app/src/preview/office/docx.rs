@@ -12,9 +12,22 @@
 //! `berschrift1` — but `styles.xml` gives every style a `w:name`, and the
 //! built-in ones keep their English names (`heading 1`, `Title`, `Quote`)
 //! whatever the language. So the id is looked up there first, and taken as
-//! the name only when there is no `styles.xml` or no entry in it. A style
-//! carries no formatting into the preview: a heading is a heading because it
-//! is called one, not because it is large and bold.
+//! the name only when there is no `styles.xml` or no entry in it. Names are
+//! compared lower-case with their spaces taken out, because the same style is
+//! `Intense Quote` to one writer and `IntenseQuote` to another, and the table
+//! of them takes in LibreOffice's and pandoc's names as well as Word's. A
+//! style carries no formatting into the preview: a heading is a heading
+//! because it is called one, not because it is large and bold.
+//!
+//! **A table's header is its first row, when the document says so.** Word
+//! says so with a flag (`w:tblHeader`, "repeat as header row"), which most
+//! documents never set. What both Word and LibreOffice do with a header row
+//! that came from anywhere else — an HTML `<th>`, a pasted spreadsheet — is
+//! make its text bold, so a first row whose every filled cell is bold
+//! throughout is a header too. That bold is read the way Word works it out:
+//! the run's own, else its character style's, else its paragraph style's,
+//! each style deferring to the one it is based on. It decides the header and
+//! nothing else; the bold drawn in a run is still only the run's own.
 //!
 //! **Numbering is a lookup and a counter.** A list item names a list
 //! (`w:numId`) and a level (`w:ilvl`); `numbering.xml` maps the list to an
@@ -22,7 +35,8 @@
 //! bullet, decimal, letters, roman numerals. The numbers themselves are not in
 //! the file: Word counts them as it lays the document out, so this counts
 //! them too, one counter per list and level, a deeper level starting again
-//! under each new item above it.
+//! under each new item above it. A bullet is `•` at every level, as it is in
+//! rendered markdown: the indent is what shows the depth.
 //!
 //! **What is not the text is skipped.** Tracked deletions and moves away, a
 //! field's code (`PAGE`, `HYPERLINK "…"`) as opposed to the result it shows,
@@ -33,10 +47,14 @@
 //! any element it is not told about. Headers, footers, footnotes and comments
 //! are parts of their own and are not read at all.
 //!
-//! **Page breaks are rules.** An explicit break, and the mark Word leaves where
-//! it last broke a page, both end the paragraph there and draw a rule, so the
-//! pages of the document are still visible as pages; what follows a break
-//! part-way through a paragraph continues as the same kind of block.
+//! **A page break is a rule.** An explicit one (`w:br w:type="page"`) ends the
+//! paragraph there and draws a rule, so the pages an author made are still
+//! visible as pages; what follows a break part-way through a paragraph
+//! continues as the same kind of block. The mark Word leaves where its last
+//! layout happened to turn the page (`w:lastRenderedPageBreak`) is not one:
+//! it falls at every page boundary, mid-sentence as often as not, and says
+//! where the pages fell for one printer's margins on one machine — layout,
+//! which is the part a preview leaves out.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek};
@@ -90,6 +108,11 @@ pub(super) fn read<R: Read + Seek>(
 struct Styles {
     /// Style id → the style's name.
     names: HashMap<String, String>,
+    /// Style id → the style it is based on (`w:basedOn`).
+    based_on: HashMap<String, String>,
+    /// Style id → its own bold (`w:b` in its `w:rPr`), for the styles that
+    /// set one.
+    bold: HashMap<String, bool>,
     /// Style id → the list (`numId`, level) a paragraph in that style is an
     /// item of, for the styles that carry their own numbering — Word's
     /// "List Bullet" and "List Number", and every document generated with
@@ -102,8 +125,40 @@ impl Styles {
         let mut styles = Styles::default();
         let mut id: Option<String> = None;
         let mut list: (Option<String>, usize) = (None, 0);
+        let mut in_run_properties = false;
+        let mut skipping = 0usize;
         for event in scan(xml) {
+            if skipping > 0 {
+                match event {
+                    Event::Start { .. } => skipping += 1,
+                    Event::End { .. } => skipping -= 1,
+                    Event::Text(_) => {}
+                }
+                continue;
+            }
             match event {
+                // A table style's formatting for its first row or its banded
+                // columns, and the formatting a tracked change replaced, are
+                // not the style's own.
+                Event::Start {
+                    name: "tblStylePr" | "rPrChange" | "pPrChange",
+                    ..
+                } => skipping = 1,
+                Event::Start {
+                    name: "basedOn",
+                    attrs,
+                } => {
+                    if let (Some(id), Some(base)) = (&id, attr(attrs, "val")) {
+                        styles.based_on.insert(id.clone(), base.into_owned());
+                    }
+                }
+                Event::Start { name: "rPr", .. } if id.is_some() => in_run_properties = true,
+                Event::End { name: "rPr" } => in_run_properties = false,
+                Event::Start { name: "b", attrs } if in_run_properties => {
+                    if let Some(id) = &id {
+                        styles.bold.insert(id.clone(), toggle(attrs));
+                    }
+                }
                 Event::Start {
                     name: "style",
                     attrs,
@@ -142,6 +197,53 @@ impl Styles {
     fn name<'a>(&'a self, id: &'a str) -> &'a str {
         self.names.get(id).map_or(id, String::as_str)
     }
+
+    /// Whether text in style `id` is bold by its style: the style's own `w:b`,
+    /// or that of the nearest style it is based on that has one. `None` when
+    /// no style in the chain says.
+    fn bold(&self, id: &str) -> Option<bool> {
+        let mut id = id;
+        // Chains are a few styles long; a loop is a writer's bug, and sixteen
+        // steps is where it stops being followed.
+        for _ in 0..16 {
+            if let Some(bold) = self.bold.get(id) {
+                return Some(*bold);
+            }
+            id = self.based_on.get(id)?;
+        }
+        None
+    }
+
+    /// Whether a character style makes its runs code.
+    fn is_code(&self, id: &str) -> bool {
+        [self.name(id), id]
+            .iter()
+            .any(|label| label.contains("Code") || CODE_RUNS.contains(&squash(label).as_str()))
+    }
+}
+
+/// Paragraph styles that make a quote, by squashed name ([`squash`]): Word's
+/// `Quote` and `Intense Quote`, LibreOffice's `Block Quotation`, pandoc's
+/// `Block Text`.
+const QUOTES: &[&str] = &["quote", "intensequote", "blockquotation", "blocktext"];
+
+/// Paragraph styles that make code, besides any with `Code` in its name:
+/// LibreOffice's `Preformatted Text`, pandoc's `Source Code`, Word's `HTML
+/// Preformatted`.
+const CODE_BLOCKS: &[&str] = &["preformattedtext", "sourcecode", "htmlpreformatted"];
+
+/// Character styles that make inline code, besides any with `Code` in its
+/// name: pandoc's `Verbatim Char`, LibreOffice's `Source Text`, Word's `HTML
+/// Code`.
+const CODE_RUNS: &[&str] = &["verbatimchar", "sourcetext", "htmlcode"];
+
+/// A style name as it is compared: lower-case, with its spaces taken out.
+fn squash(label: &str) -> String {
+    label
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// What a paragraph style makes of its paragraphs.
@@ -155,15 +257,11 @@ enum Kind {
 
 /// The kind a style is, by its name and then by its id: `Title` is the first
 /// heading, `heading N` (or `HeadingN`) the Nth, clamped to the six markdown
-/// has; `Quote` and `Intense Quote` are quotes; a style with `Code` in its name
-/// and `HTML Preformatted` are code.
+/// has; the [`QUOTES`] are quotes; a style with `Code` in its name and the
+/// [`CODE_BLOCKS`] are code.
 fn kind(id: &str, name: &str) -> Kind {
     for label in [name, id] {
-        let squashed: String = label
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_lowercase();
+        let squashed = squash(label);
         if squashed == "title" {
             return Kind::Heading(1);
         }
@@ -173,10 +271,10 @@ fn kind(id: &str, name: &str) -> Kind {
         {
             return Kind::Heading(n.clamp(1, 6) as u8);
         }
-        if squashed == "quote" || squashed == "intensequote" {
+        if QUOTES.contains(&squashed.as_str()) {
             return Kind::Quote;
         }
-        if label.contains("Code") || squashed == "htmlpreformatted" {
+        if label.contains("Code") || CODE_BLOCKS.contains(&squashed.as_str()) {
             return Kind::Code;
         }
     }
@@ -281,16 +379,6 @@ impl Numbering {
     fn format(&self, num: &str, level: usize) -> Option<&Format> {
         let id = self.lists.get(num)?;
         self.formats.get(id)?.get(&level)
-    }
-}
-
-/// A bullet list's marker at `level`: a filled bullet, then an open one, then
-/// a square, the way Word's own default bullets step in.
-fn bullet(level: usize) -> &'static str {
-    match level {
-        0 => "•",
-        1 => "◦",
-        _ => "▪",
     }
 }
 
@@ -412,6 +500,10 @@ struct Paragraph {
     /// What the paragraph became once part of it was written out, by a page
     /// break part-way through it.
     shape: Option<Shape>,
+    /// It has text a person would see, and some of that text is not bold —
+    /// the two facts a table's header row is judged by.
+    has_text: bool,
+    has_plain_text: bool,
 }
 
 /// The table being read: only the outermost one has rows and cells, and a
@@ -421,9 +513,13 @@ struct Table {
     rows: Vec<Vec<Vec<Span>>>,
     row: Vec<Vec<Span>>,
     cell: Vec<Span>,
-    /// The first row repeats as a header on every page (`w:tblHeader`).
+    /// The first row is the table's header.
     header: bool,
+    /// The row being read repeats as a header on every page (`w:tblHeader`).
     row_is_header: bool,
+    /// The row being read has text, and some of it is not bold.
+    row_has_text: bool,
+    row_has_plain_text: bool,
 }
 
 /// The walk over `document.xml`.
@@ -436,6 +532,11 @@ struct Body<'a> {
     skipping: usize,
     paragraph: Option<Paragraph>,
     run: Style,
+    /// The current run's own bold and its character style, for working out
+    /// whether its text is bold when the run does not say (see the module
+    /// essay on headers).
+    run_bold: Option<bool>,
+    run_style: Option<String>,
     in_run: bool,
     in_run_properties: bool,
     in_paragraph_properties: bool,
@@ -458,6 +559,8 @@ impl<'a> Body<'a> {
             skipping: 0,
             paragraph: None,
             run: Style::default(),
+            run_bold: None,
+            run_style: None,
             in_run: false,
             in_run_properties: false,
             in_paragraph_properties: false,
@@ -520,14 +623,21 @@ impl<'a> Body<'a> {
                     link: self.links > 0,
                     ..Style::default()
                 };
+                self.run_bold = None;
+                self.run_style = None;
             }
             "rPr" if self.in_run => self.in_run_properties = true,
-            "b" if self.in_run_properties => self.run.bold = toggle(attrs),
+            "b" if self.in_run_properties => {
+                self.run.bold = toggle(attrs);
+                self.run_bold = Some(self.run.bold);
+            }
             "i" if self.in_run_properties => self.run.italic = toggle(attrs),
             "rStyle" if self.in_run_properties => {
-                self.run.code = attr(attrs, "val").is_some_and(|id| {
-                    self.styles.name(&id).contains("Code") || id.contains("Code")
-                });
+                self.run_style = attr(attrs, "val").map(|id| id.into_owned());
+                self.run.code = self
+                    .run_style
+                    .as_deref()
+                    .is_some_and(|id| self.styles.is_code(id));
             }
             "t" if self.in_run => self.in_text = true,
             "tab" if self.in_run => self.text("    "),
@@ -540,7 +650,6 @@ impl<'a> Body<'a> {
             }
             "cr" if self.in_run => self.text("\n"),
             "noBreakHyphen" if self.in_run => self.text("-"),
-            "lastRenderedPageBreak" => self.page_break(out),
             "drawing" | "pict" | "object" => {
                 let style = if self.in_run {
                     self.run
@@ -562,6 +671,8 @@ impl<'a> Body<'a> {
             "tr" if self.tables == 1 => {
                 self.table.row.clear();
                 self.table.row_is_header = false;
+                self.table.row_has_text = false;
+                self.table.row_has_plain_text = false;
             }
             "trPr" if self.tables == 1 => self.in_row_properties = true,
             "tblHeader" if self.in_row_properties => self.table.row_is_header = toggle(attrs),
@@ -590,7 +701,9 @@ impl<'a> Body<'a> {
             }
             "tr" if self.tables == 1 => {
                 if self.table.rows.is_empty() {
-                    self.table.header = self.table.row_is_header;
+                    // Marked as one, or bold wherever it says anything.
+                    self.table.header = self.table.row_is_header
+                        || (self.table.row_has_text && !self.table.row_has_plain_text);
                 }
                 let row = std::mem::take(&mut self.table.row);
                 self.table.rows.push(row);
@@ -610,9 +723,23 @@ impl<'a> Body<'a> {
 
     /// Text in the current run.
     fn text(&mut self, text: &str) {
+        let visible = !text.trim().is_empty();
+        let bold = visible && self.bold();
         if let Some(paragraph) = &mut self.paragraph {
             push_text(&mut paragraph.spans, text, self.run);
+            paragraph.has_text |= visible;
+            paragraph.has_plain_text |= visible && !bold;
         }
+    }
+
+    /// Whether the current run's text is bold, as Word works it out: the
+    /// run's own say, else its character style's, else its paragraph style's.
+    fn bold(&self) -> bool {
+        let styled = |id: Option<&str>| id.and_then(|id| self.styles.bold(id));
+        self.run_bold
+            .or_else(|| styled(self.run_style.as_deref()))
+            .or_else(|| styled(self.paragraph.as_ref().and_then(|p| p.style.as_deref())))
+            .unwrap_or(false)
     }
 
     fn end_paragraph(&mut self, out: &mut Out) {
@@ -620,6 +747,8 @@ impl<'a> Body<'a> {
             return;
         };
         if self.tables > 0 {
+            self.table.row_has_text |= paragraph.has_text;
+            self.table.row_has_plain_text |= paragraph.has_plain_text;
             push_cell_paragraph(&mut self.table.cell, paragraph.spans);
             return;
         }
@@ -708,7 +837,7 @@ impl<'a> Body<'a> {
             return "•".to_string();
         };
         if format.kind == "bullet" {
-            return bullet(level).to_string();
+            return "•".to_string();
         }
         let n = counters[level].map_or(format.start, |n| n.saturating_add(1));
         counters[level] = Some(n);
@@ -887,8 +1016,10 @@ mod tests {
         <w:num w:numId="2"><w:abstractNumId w:val="20"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="upperLetter"/></w:lvl></w:lvlOverride></w:num>
     "#;
 
+    /// One bullet at every depth, as in rendered markdown: the indent shows
+    /// the nesting.
     #[test]
-    fn bullets_step_their_glyph_by_level() {
+    fn a_bullet_is_the_same_bullet_at_every_depth() {
         let body = [
             li("1", 0, "a"),
             li("1", 1, "b"),
@@ -900,9 +1031,9 @@ mod tests {
             docx(&body, None, Some(NUMBERING)),
             vec![
                 item(0, "•", "a"),
-                item(1, "◦", "b"),
-                item(2, "▪", "c"),
-                item(MAX_DEPTH, "▪", "d"),
+                item(1, "•", "b"),
+                item(2, "•", "c"),
+                item(MAX_DEPTH, "•", "d"),
             ]
         );
     }
@@ -1035,14 +1166,14 @@ mod tests {
     #[test]
     fn a_page_break_is_a_rule_and_splits_its_paragraph() {
         let body = [
+            // A break at the very start divides nothing from nothing.
+            r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#.to_string(),
             p("", "page one"),
             r#"<w:p><w:r><w:t>before</w:t><w:br w:type="page"/><w:t>after</w:t></w:r></w:p>"#
                 .to_string(),
-            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:t>page three</w:t></w:r></w:p>"#.to_string(),
-            // Word's explicit break, then its own mark at the top of the next
-            // page: one rule, not two.
+            // Two breaks in a row are one rule.
             r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#.to_string(),
-            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:t>page four</w:t></w:r></w:p>"#.to_string(),
+            r#"<w:p><w:r><w:br w:type="page"/><w:t>page four</w:t></w:r></w:p>"#.to_string(),
         ]
         .concat();
         assert_eq!(
@@ -1058,11 +1189,26 @@ mod tests {
                 Block::Gap,
                 Block::Rule,
                 Block::Gap,
-                paragraph("page three"),
-                Block::Gap,
-                Block::Rule,
-                Block::Gap,
                 paragraph("page four"),
+            ]
+        );
+    }
+
+    /// Where Word's last layout turned the page is layout, not the document:
+    /// the paragraph it fell in reads whole, with no rule.
+    #[test]
+    fn where_word_last_turned_the_page_is_not_a_break() {
+        let body = [
+            r#"<w:p><w:r><w:t xml:space="preserve">a sentence that ran </w:t><w:lastRenderedPageBreak/><w:t>onto the next page</w:t></w:r></w:p>"#.to_string(),
+            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:t>a page that began here</w:t></w:r></w:p>"#.to_string(),
+        ]
+        .concat();
+        assert_eq!(
+            docx(&body, None, None),
+            vec![
+                paragraph("a sentence that ran onto the next page"),
+                Block::Gap,
+                paragraph("a page that began here"),
             ]
         );
     }
@@ -1070,7 +1216,7 @@ mod tests {
     #[test]
     fn a_list_item_split_by_a_page_continues_without_a_second_marker() {
         let body = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>
-            <w:r><w:t>starts here</w:t><w:lastRenderedPageBreak/><w:t>ends here</w:t></w:r></w:p>"#;
+            <w:r><w:t>starts here</w:t><w:br w:type="page"/><w:t>ends here</w:t></w:r></w:p>"#;
         assert_eq!(
             docx(body, None, Some(NUMBERING)),
             vec![
@@ -1109,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_is_the_image_marker_once() {
+    fn a_picture_is_the_image_marker_once_and_two_are_two() {
         let body = r#"<w:p>
             <w:r><w:t xml:space="preserve">See </w:t></w:r>
             <w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
@@ -1125,7 +1271,7 @@ mod tests {
             docx(body, None, None),
             vec![Block::Paragraph(vec![
                 span("See "),
-                styled("🖼 image🖼 image", marker),
+                styled("🖼 image 🖼 image", marker),
                 span(" here."),
             ])]
         );
@@ -1173,6 +1319,126 @@ mod tests {
                 },
                 Block::Gap,
                 paragraph("after"),
+            ]
+        );
+    }
+
+    /// Word's, LibreOffice's and pandoc's names for a quote, a code block and
+    /// inline code, by name or by id, however they are spaced or cased.
+    #[test]
+    fn quotes_and_code_are_known_by_every_writers_name_for_them() {
+        let styles = [
+            style("BlockQuotation", "Block Quotation"),
+            style("BlockText", "Block Text"),
+            style("a1", "Intense Quote"),
+            style("PreformattedText", "Preformatted Text"),
+            style("SourceCode", "Source Code"),
+            style("a2", "HTML Preformatted"),
+            r#"<w:style w:type="character" w:styleId="VerbatimChar"><w:name w:val="Verbatim Char"/></w:style>
+               <w:style w:type="character" w:styleId="SourceText"><w:name w:val="Source Text"/></w:style>
+               <w:style w:type="character" w:styleId="a3"><w:name w:val="HTML Code"/></w:style>"#
+                .to_string(),
+        ]
+        .concat();
+        let run = |style: &str, text: &str| {
+            format!(r#"<w:r><w:rPr><w:rStyle w:val="{style}"/></w:rPr><w:t>{text}</w:t></w:r>"#)
+        };
+        let body = [
+            p("BlockQuotation", "LibreOffice's"),
+            p("BlockText", "pandoc's"),
+            p("a1", "Word's"),
+            // Not in styles.xml: the id is the name, and squashes the same.
+            p("IntenseQuote", "by id"),
+            p("", "between"),
+            p("PreformattedText", "one"),
+            p("SourceCode", "two"),
+            p("a2", "three"),
+            format!(
+                "<w:p>{}{}{}</w:p>",
+                run("VerbatimChar", "a"),
+                run("SourceText", "b"),
+                run("a3", "c")
+            ),
+        ]
+        .concat();
+        let code = Style {
+            code: true,
+            ..Style::default()
+        };
+        assert_eq!(
+            docx(&body, Some(&styles), None),
+            vec![
+                Block::Quote(vec![span("LibreOffice's")]),
+                Block::Quote(Vec::new()),
+                Block::Quote(vec![span("pandoc's")]),
+                Block::Quote(Vec::new()),
+                Block::Quote(vec![span("Word's")]),
+                Block::Quote(Vec::new()),
+                Block::Quote(vec![span("by id")]),
+                Block::Gap,
+                paragraph("between"),
+                Block::Gap,
+                Block::Code {
+                    syntax: None,
+                    lines: vec!["one".to_string(), "two".to_string(), "three".to_string()],
+                },
+                Block::Gap,
+                Block::Paragraph(vec![styled("abc", code)]),
+            ]
+        );
+    }
+
+    /// A table whose first row came from an HTML `<th>`: bold wherever it
+    /// says anything — by the run, as Word writes it, or by the paragraph
+    /// style, as LibreOffice's "Table Heading" does — is a header; a first row
+    /// only partly bold is not.
+    #[test]
+    fn a_first_row_bold_throughout_is_a_header() {
+        let styles = r#"
+            <w:style w:type="paragraph" w:styleId="TableContents"><w:name w:val="Table Contents"/><w:rPr/></w:style>
+            <w:style w:type="paragraph" w:styleId="TableHeading"><w:name w:val="Table Heading"/><w:basedOn w:val="TableContents"/><w:rPr><w:b/><w:bCs/></w:rPr></w:style>
+            <w:style w:type="paragraph" w:styleId="HeadingRow"><w:name w:val="Heading Row"/><w:basedOn w:val="TableHeading"/></w:style>
+            <w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#;
+        let bold = |text: &str| {
+            format!(r#"<w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
+        };
+        let plain = |text: &str| format!("<w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>");
+        let styled_cell = |style: &str, text: &str| {
+            format!(
+                r#"<w:tc><w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr><w:r><w:rPr/><w:t>{text}</w:t></w:r></w:p></w:tc>"#
+            )
+        };
+        let empty = "<w:tc><w:p/></w:tc>".to_string();
+        let tables = [
+            // Word's: bold runs, an empty corner cell.
+            format!("<w:tbl><w:tr>{empty}{}{}</w:tr><w:tr>{}{}{}</w:tr></w:tbl>", bold("Qty"), bold("Price"), plain("Apples"), plain("3"), plain("1.5")),
+            // LibreOffice's: a bold paragraph style, one level up its chain
+            // and two.
+            format!("<w:tbl><w:tblPr><w:tblStyle w:val=\"Grid\"/></w:tblPr><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl>", styled_cell("TableHeading", "Name"), styled_cell("HeadingRow", "Qty"), styled_cell("TableContents", "Pears"), styled_cell("TableContents", "12")),
+            // Partly bold: not a header.
+            format!("<w:tbl><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl>", bold("Total"), plain("15"), plain("a"), plain("b")),
+            // A bold style with the run saying otherwise: not a header.
+            format!(r#"<w:tbl><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="TableHeading"/></w:pPr><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>x</w:t></w:r></w:p></w:tc></w:tr><w:tr>{}</w:tr></w:tbl>"#, plain("y")),
+        ]
+        .join(&p("", "-"));
+        let headers: Vec<Vec<Vec<Span>>> = docx(&tables, Some(styles), None)
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::Table { header, .. } => Some(header),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                vec![
+                    Vec::new(),
+                    vec![styled("Qty", BOLD)],
+                    vec![styled("Price", BOLD)]
+                ],
+                row(&["Name", "Qty"]),
+                Vec::new(),
+                Vec::new(),
             ]
         );
     }

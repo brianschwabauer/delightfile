@@ -269,16 +269,18 @@ fn push_text(spans: &mut Vec<Span>, text: &str, style: Style) {
 
 /// The span a picture leaves in the text: the marker [`super::markdown`]'s
 /// `inline` draws for an image, with "image" for the alt text a document's
-/// pictures seldom carry.
+/// pictures seldom carry. Two pictures side by side are two markers with a
+/// space between, not one word.
 fn picture(spans: &mut Vec<Span>, style: Style) {
-    push_text(
-        spans,
-        "🖼 image",
-        Style {
-            code: true,
-            ..style
-        },
-    );
+    const MARKER: &str = "🖼 image";
+    let style = Style {
+        code: true,
+        ..style
+    };
+    if spans.last().is_some_and(|last| last.text.ends_with(MARKER)) {
+        push_text(spans, " ", style);
+    }
+    push_text(spans, MARKER, style);
 }
 
 /// Whether a paragraph's spans have anything a person would see.
@@ -956,7 +958,7 @@ mod tests {
         out.push(Block::Gap);
         out.push(paragraph("two"));
         out.push(item(0, "•", "a"));
-        out.push(item(1, "◦", "b"));
+        out.push(item(1, "•", "b"));
         out.push(Block::Quote(vec![span("q1")]));
         out.push(Block::Quote(vec![span("q2")]));
         out.push(Block::Code {
@@ -979,7 +981,7 @@ mod tests {
                 paragraph("two"),
                 Block::Gap,
                 item(0, "•", "a"),
-                item(1, "◦", "b"),
+                item(1, "•", "b"),
                 Block::Gap,
                 Block::Quote(vec![span("q1")]),
                 Block::Quote(Vec::new()),
