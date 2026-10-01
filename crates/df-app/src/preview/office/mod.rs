@@ -92,7 +92,7 @@ pub struct Reading {
 pub fn read(path: &Path) -> Result<Reading, String> {
     let file = File::open(path).map_err(quiet)?;
     let len = file.metadata().map_err(quiet)?.len();
-    read_package(Package { reader: file, len })
+    read_package(Package::open(file, len)?)
 }
 
 /// [`read`], from any zip: the tests hand it one built in memory.
@@ -110,17 +110,21 @@ fn read_package<R: Read + Seek>(mut package: Package<R>) -> Result<Reading, Stri
     Ok(out.finish())
 }
 
-/// The zip an Office file is, asked for its parts by name.
+/// The zip an Office file is, opened once — its index read once, however many
+/// slides or sheets are asked for after — and asked for its parts by name.
 struct Package<R> {
-    reader: R,
-    len: u64,
+    zip: zip::Package<R>,
 }
 
 impl<R: Read + Seek> Package<R> {
+    fn open(reader: R, len: u64) -> Result<Package<R>, String> {
+        let zip = zip::Package::open(reader, len).map_err(quiet)?;
+        Ok(Package { zip })
+    }
+
     /// One part as text, or `None` when the package has no such part.
     fn part(&mut self, name: &str) -> Result<Option<String>, String> {
-        let bytes =
-            zip::read_member(&mut self.reader, self.len, name, MAX_PART_BYTES).map_err(quiet)?;
+        let bytes = self.zip.member(name, MAX_PART_BYTES).map_err(quiet)?;
         Ok(bytes.map(|bytes| text(&bytes)))
     }
 }
@@ -604,7 +608,7 @@ mod tests {
     use std::io::Cursor;
 
     /// A stored zip of `parts`, in order, in memory: enough of the format for
-    /// `zip::read_member` to find each by name. The 3MF tests in
+    /// `zip::Package` to find each by name. The 3MF tests in
     /// `doc::model` build theirs the same way.
     pub fn zip_of(parts: &[(&str, &str)]) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
@@ -677,10 +681,7 @@ mod tests {
     pub fn read_parts(parts: &[(&str, &str)]) -> Result<Reading, String> {
         let bytes = zip_of(parts);
         let len = bytes.len() as u64;
-        read_package(Package {
-            reader: Cursor::new(bytes),
-            len,
-        })
+        read_package(Package::open(Cursor::new(bytes), len)?)
     }
 
     /// The blocks of a package that must read.
@@ -913,12 +914,10 @@ mod tests {
     fn a_file_that_is_not_a_zip_says_why_quietly() {
         let bytes = b"This is just some text, and certainly not a zip.".to_vec();
         let len = bytes.len() as u64;
-        let err = read_package(Package {
-            reader: Cursor::new(bytes),
-            len,
-        })
-        .err()
-        .unwrap_or_default();
+        let err = Package::open(Cursor::new(bytes), len)
+            .and_then(read_package)
+            .err()
+            .unwrap_or_default();
         assert!(err.starts_with("malformed zip"), "{err}");
     }
 

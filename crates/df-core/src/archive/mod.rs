@@ -185,7 +185,7 @@ pub enum ArchiveError {
         want: u64,
     },
     /// One member that is there and will not be handed back whole
-    /// ([`zip::read_member`]): encrypted, compressed with a method this build
+    /// ([`zip::Package::member`]): encrypted, compressed with a method this build
     /// cannot inflate, or bigger than the caller allowed. The reason is the
     /// sentence the extractor would refuse the same member with.
     #[error("{name}: {reason}")]

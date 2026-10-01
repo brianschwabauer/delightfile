@@ -546,10 +546,9 @@ fn a_written_member_is_read_back_by_name() {
     pack(vec![t.join("src/pics")], dest.clone(), Format::Zip);
 
     let bytes = std::fs::read(&dest).unwrap();
-    let len = bytes.len() as u64;
-    let read = |name: &str| {
-        crate::archive::zip::read_member(&mut Cursor::new(&bytes), len, name, 1 << 20).unwrap()
-    };
+    let mut package =
+        crate::archive::zip::Package::open(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+    let mut read = |name: &str| package.member(name, 1 << 20).unwrap();
     assert_eq!(read("pics/photo.jpg"), Some(jpg), "the stored one");
     assert_eq!(read("pics/notes.txt"), Some(txt), "the deflated one");
     assert_eq!(read("pics/missing.txt"), None);

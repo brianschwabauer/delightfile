@@ -1734,9 +1734,50 @@ fn one_entry_can_be_read_back_for_a_preview() {
 
 // ── one member, by name: the format readers' door ───────────────────────────
 
-/// `zip::read_member` over an in-memory zip.
+/// One member of an in-memory zip, through a package opened for it alone.
 fn member(bytes: &[u8], name: &str, cap: u64) -> Result<Option<Vec<u8>>, ArchiveError> {
-    zip::read_member(&mut Cursor::new(bytes), bytes.len() as u64, name, cap)
+    zip::Package::open(Cursor::new(bytes), bytes.len() as u64)?.member(name, cap)
+}
+
+/// What a format reader does: open the package once and ask for one part
+/// after another — the same part twice, a part that is not there, one that
+/// is refused — and every answer is the one a fresh package would give.
+#[test]
+fn a_package_reads_several_members_in_turn() {
+    let document = b"<w:document>".repeat(300);
+    let bytes = build_zip(
+        &[
+            ZipMember::file("[Content_Types].xml", b"<Types/>"),
+            ZipMember::file("word/document.xml", &document).really_deflated(),
+            ZipMember::file("word/styles.xml", b"<w:styles/>"),
+            ZipMember::file("word/secret.xml", b"<x/>").encrypted(),
+        ],
+        b"",
+    );
+    let mut package = zip::Package::open(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+    assert_eq!(
+        package.member("word/styles.xml", 1024).unwrap().as_deref(),
+        Some(&b"<w:styles/>"[..])
+    );
+    assert_eq!(
+        package.member("word/document.xml", 1 << 20).unwrap(),
+        Some(document.clone())
+    );
+    assert_eq!(package.member("word/numbering.xml", 1024).unwrap(), None);
+    assert!(package.member("word/secret.xml", 1024).is_err());
+    assert!(package.member("word/document.xml", 10).is_err());
+    // A refusal leaves the package as it was.
+    assert_eq!(
+        package.member("word/document.xml", 1 << 20).unwrap(),
+        Some(document)
+    );
+    assert_eq!(
+        package
+            .member("[Content_Types].xml", 1024)
+            .unwrap()
+            .as_deref(),
+        Some(&b"<Types/>"[..])
+    );
 }
 
 #[test]

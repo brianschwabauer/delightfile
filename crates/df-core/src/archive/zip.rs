@@ -660,74 +660,102 @@ pub(crate) fn read_one<R: Read + Seek>(
 // A format that is a zip — an Office document, a 3MF, an epub — is read by
 // asking for its parts by the names its specification gives them:
 // `word/document.xml`, `ppt/slides/slide3.xml`. That is neither a listing nor
-// an extraction. It wants one member, whole, in memory, found by its exact
-// name rather than by a path normalised the way a person browsing the archive
-// would type it, and it wants to hear *why* when a part that is there cannot
-// be read: a reader told "no such part" about an encrypted document would
-// describe the file as something it is not. Everything else is what the two
-// paths above already do, and is done by the same code — the index finds the
-// member, the local header says where its bytes start, the payload is
-// inflated and held to the length the index declared.
+// an extraction. It wants members one at a time, whole, in memory, each found
+// by its exact name rather than by a path normalised the way a person
+// browsing the archive would type it, and it wants to hear *why* when a part
+// that is there cannot be read: a reader told "no such part" about an
+// encrypted document would describe the file as something it is not. And it
+// asks for a great many — a deck's two hundred slides, a workbook's every
+// sheet — so the index is read once, when the package is opened
+// ([`Package::open`]), and each member after that costs its own bytes and
+// nothing more. Everything else is what the two paths above already do, and
+// is done by the same code — the index finds the member, the local header
+// says where its bytes start, the payload is inflated and held to the length
+// the index declared.
 
-/// One member's bytes, by its exact name in the central directory.
-///
-/// `Ok(None)` when no file member has that name: to a format reader a part
-/// that is not there is an answer (an Office document without
-/// `word/styles.xml` is still a document), not a failure. A member that is
-/// there and cannot be handed back is an [`ArchiveError::Refused`] that says
-/// why — encrypted, compressed with a method this build does not inflate, or
-/// declaring more than `cap` bytes.
-///
-/// `cap` is held against the size the index declares, before anything is
-/// allocated, and the inflate is held to that same declared size, so a member
-/// that lies about its length cannot get past the cap that way either. `len`
-/// is the file's length, as for [`list`].
-pub fn read_member<R: Read + Seek>(
-    reader: &mut R,
+/// A zip opened to be read member by member, by name: its central directory
+/// parsed once, then any number of members out of it (see the essay above).
+pub struct Package<R> {
+    reader: R,
+    /// The file's length, which is where its index is found from.
     len: u64,
-    name: &str,
-    cap: u64,
-) -> Result<Option<Vec<u8>>, ArchiveError> {
-    // Not consulted: a member past a truncated directory is a member this
-    // reader cannot see, which is `None` like any other absent part.
-    let (records, _truncated) = central(reader, len)?;
-    let Some(record) = records
-        .iter()
-        .find(|record| !record.entry.is_dir && record.entry.name == name)
-    else {
-        return Ok(None);
-    };
-    let entry = &record.entry;
-    let refused = |reason: String| ArchiveError::Refused {
-        name: entry.name.clone(),
-        reason,
-    };
-    if entry.encrypted {
-        return Err(refused("encrypted".to_string()));
+    records: Vec<Record>,
+}
+
+impl<R: Read + Seek> Package<R> {
+    /// Read the index of the zip in `reader`; `len` is the file's length, as
+    /// for [`list`]. A file that is not a zip is an error here, before any
+    /// member is asked for.
+    pub fn open(mut reader: R, len: u64) -> Result<Package<R>, ArchiveError> {
+        // Whether the directory was cut short is not kept: a member past the
+        // cut is a member this cannot see, which is `None` like any other
+        // absent part.
+        let (records, _truncated) = central(&mut reader, len)?;
+        Ok(Package {
+            reader,
+            len,
+            records,
+        })
     }
-    let Some(method) = supported(entry.method) else {
-        return Err(refused(format!(
-            "{} compression is not supported",
-            entry.method.label()
-        )));
-    };
-    if entry.len > cap {
-        return Err(refused(format!(
-            "{} bytes, more than the {cap} this reads",
-            entry.len
-        )));
-    }
-    let local = local_header(reader, record.local_at, len)
-        .map_err(from_extraction)?
-        .ok_or_else(|| {
-            malformed(format!(
-                "{name}: the index points at a member that is not there"
-            ))
-        })?;
-    if local.encrypted {
-        return Err(refused("encrypted".to_string()));
-    }
-    whole(reader, method, local.data_at, entry.compressed, entry.len)
+
+    /// One member's bytes, by its exact name in the central directory.
+    ///
+    /// `Ok(None)` when no file member has that name: to a format reader a part
+    /// that is not there is an answer (an Office document without
+    /// `word/styles.xml` is still a document), not a failure. A member that is
+    /// there and cannot be handed back is an [`ArchiveError::Refused`] that
+    /// says why — encrypted, compressed with a method this build does not
+    /// inflate, or declaring more than `cap` bytes.
+    ///
+    /// `cap` is held against the size the index declares, before anything is
+    /// allocated, and the inflate is held to that same declared size, so a
+    /// member that lies about its length cannot get past the cap that way
+    /// either.
+    pub fn member(&mut self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ArchiveError> {
+        let Some(record) = self
+            .records
+            .iter()
+            .find(|record| !record.entry.is_dir && record.entry.name == name)
+        else {
+            return Ok(None);
+        };
+        let entry = &record.entry;
+        let refused = |reason: String| ArchiveError::Refused {
+            name: entry.name.clone(),
+            reason,
+        };
+        if entry.encrypted {
+            return Err(refused("encrypted".to_string()));
+        }
+        let Some(method) = supported(entry.method) else {
+            return Err(refused(format!(
+                "{} compression is not supported",
+                entry.method.label()
+            )));
+        };
+        if entry.len > cap {
+            return Err(refused(format!(
+                "{} bytes, more than the {cap} this reads",
+                entry.len
+            )));
+        }
+        let local = local_header(&mut self.reader, record.local_at, self.len)
+            .map_err(from_extraction)?
+            .ok_or_else(|| {
+                malformed(format!(
+                    "{name}: the index points at a member that is not there"
+                ))
+            })?;
+        if local.encrypted {
+            return Err(refused("encrypted".to_string()));
+        }
+        whole(
+            &mut self.reader,
+            method,
+            local.data_at,
+            entry.compressed,
+            entry.len,
+        )
         .map_err(from_extraction)?
         .map(Some)
         .ok_or_else(|| {
@@ -736,6 +764,7 @@ pub fn read_member<R: Read + Seek>(
                 entry.len
             ))
         })
+    }
 }
 
 /// A member's payload inflated whole, or `None` when it inflates past
