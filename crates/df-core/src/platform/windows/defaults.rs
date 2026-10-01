@@ -18,10 +18,21 @@
 //! The rules are Linux's row for row, as on macOS: the system's default app
 //! (`open`) where Linux has delightviewer, and the openers Windows does not
 //! ship left out — delightviewer's editor, the wallpaper and AVIF helpers,
-//! and `edit-image`, which is `open` here. The bookmarks are §6's Windows
-//! column: Brian's server mounts and hosts are no place on a Windows machine.
+//! and `edit-image`, which is `open` here.
+//!
+//! **The bookmarks are a Windows user's places** (W4.40): the profile folder
+//! as Home, the known folders where the shell says they are — a Documents
+//! OneDrive took over is found in `OneDrive` — the system drive's root, and
+//! `%APPDATA%`, where delightfile's own config lives. Each is written as
+//! Windows writes it, `C:\Users\admin\Downloads`, and says so on the
+//! which-key card. `g /` has no root to go to here, and opens the Places
+//! card, whose Drives section is what a root would have listed.
 
 use std::path::Path;
+
+use crate::config::Bookmark;
+
+use super::known::{self, Known};
 
 /// Openers a rule can name: id, the commands to choose from (the first
 /// whose program is on `PATH`, else the last), blocking, description.
@@ -162,50 +173,128 @@ pub const RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "*", &["open", "terminal-at"]),
 ];
 
-/// The `g` chord's bookmarks: key, path, description, in which-key order.
-///
-/// `g c` is the folder `%APPDATA%` names by default, written from `~`
-/// because a bookmark expands `~` and nothing else. Desktop and Documents
-/// are on the letters a Mac gives them, so `g D` and `g o` mean one place on
-/// both.
-pub const BOOKMARKS: &[(&str, &str, &str)] = &[
-    ("h", "~", "Go home"),
-    ("c", "~/AppData/Roaming", "Go to %APPDATA%"),
-    ("d", "~/Downloads", "Go to ~/Downloads"),
-    ("w", "~/Work", "Go to ~/Work"),
-    ("D", "~/Desktop", "Go to ~/Desktop"),
-    ("o", "~/Documents", "Go to ~/Documents"),
-];
+/// The `g` chord's bookmarks, in which-key order: Home, the six known
+/// folders, the system drive, `%APPDATA%`. A folder this machine cannot
+/// name is left out rather than shipped as a place that is not there.
+pub fn bookmarks() -> Vec<Bookmark> {
+    let mut rows = Vec::new();
+    if let Some(home) = super::dirs::home() {
+        rows.push(named("h", &home, "Home"));
+    }
+    for (key, which) in [
+        ("d", Known::Downloads),
+        ("D", Known::Desktop),
+        ("o", Known::Documents),
+        ("p", Known::Pictures),
+        ("v", Known::Videos),
+        ("m", Known::Music),
+    ] {
+        if let Some(path) = known::folder(which) {
+            rows.push(named(key, &path, which.name()));
+        }
+    }
+    let drive = system_drive(std::env::var("SystemDrive").ok().as_deref());
+    rows.push(Bookmark::row(
+        "c",
+        &drive,
+        &format!("Drive {}", drive.trim_end_matches('\\')),
+    ));
+    if let Some(appdata) = super::dirs::config_dir() {
+        rows.push(named("a", &appdata, "AppData"));
+    }
+    rows
+}
 
-/// Rows the platform lays over the shipped keymap: none, since Windows'
-/// keymap is Linux's (05-defaults-and-config.md §3).
-pub const KEYMAP_OVERRIDES: &[(&str, &str, &str, &str)] = &[];
+/// A bookmark to `path` that the Places card calls `name`, and the
+/// which-key card names with where it is: `Home · C:\Users\admin`.
+fn named(key: &str, path: &Path, name: &str) -> Bookmark {
+    let path = crate::path::display(path);
+    Bookmark {
+        key: key.to_string(),
+        description: format!("{name} · {path}"),
+        path,
+        name: Some(name.to_string()),
+    }
+}
+
+/// The system drive's root, `C:\`, from `%SystemDrive%` (`C:`), which a
+/// stripped environment may not have.
+fn system_drive(variable: Option<&str>) -> String {
+    let drive = variable
+        .map(str::trim)
+        .filter(|drive| drive.len() == 2 && drive.ends_with(':'))
+        .unwrap_or("C:");
+    format!("{drive}\\")
+}
+
+/// Rows the platform lays over the shipped keymap. `g /` is the Places
+/// card, a Windows machine having no root for it to go to; Linux and macOS
+/// leave `g /` unbound.
+pub const KEYMAP_OVERRIDES: &[(&str, &str, &str, &str)] = &[(
+    "files",
+    "g /",
+    "mount-manager",
+    "Places: drives and network",
+)];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, Opener};
+    use crate::keymap::{parse_sequence, Command, Context, Registry};
 
-    /// A fresh install on Windows goes where §6's Windows column says, the
-    /// server mounts Linux ships left out.
+    /// A fresh install goes where a Windows user's places are: the keys,
+    /// in which-key order, each a full path written with `\`, Home and
+    /// AppData named for the Places card, every description saying where.
     #[test]
-    fn default_bookmarks_are_the_goto_table() {
+    fn default_bookmarks_are_a_windows_users_places() {
         let c = Config::default();
-        let pairs: Vec<(&str, &str)> = c
-            .goto
-            .iter()
-            .map(|b| (b.key.as_str(), b.path.as_str()))
-            .collect();
+        let keys: Vec<&str> = c.goto.iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(keys, ["h", "d", "D", "o", "p", "v", "m", "c", "a"]);
+        for b in &c.goto {
+            assert!(Path::new(&b.path).is_absolute(), "{b:?}");
+            assert!(!b.path.contains('/'), "{b:?}");
+            assert!(!b.path.starts_with('~'), "{b:?}");
+            assert!(b.description.contains(&b.path), "{b:?}");
+        }
+        let at = |key: &str| c.goto.iter().find(|b| b.key == key).expect(key);
+        let home = super::super::dirs::home().expect("a profile");
+        assert_eq!(Path::new(&at("h").path), home);
+        assert_eq!(at("h").name.as_deref(), Some("Home"));
+        assert_eq!(at("h").description, format!("Home · {}", home.display()));
+        assert_eq!(at("a").name.as_deref(), Some("AppData"));
         assert_eq!(
-            pairs,
-            vec![
-                ("h", "~"),
-                ("c", "~/AppData/Roaming"),
-                ("d", "~/Downloads"),
-                ("w", "~/Work"),
-                ("D", "~/Desktop"),
-                ("o", "~/Documents"),
-            ]
+            Path::new(&at("a").path),
+            super::super::dirs::config_dir().expect("appdata")
+        );
+        assert!(at("c").path.ends_with(":\\"), "{:?}", at("c"));
+        assert_eq!(
+            Path::new(&at("d").path),
+            known::folder(Known::Downloads).expect("Downloads")
+        );
+        assert!(c.goto.iter().all(|b| !b.path.contains("Work")));
+    }
+
+    /// `%SystemDrive%` is the drive `g c` goes to the root of, `C:\` when
+    /// it is missing or not a drive.
+    #[test]
+    fn the_system_drive_is_its_root() {
+        assert_eq!(system_drive(Some("C:")), r"C:\");
+        assert_eq!(system_drive(Some("D:")), r"D:\");
+        assert_eq!(system_drive(None), r"C:\");
+        assert_eq!(system_drive(Some("")), r"C:\");
+        assert_eq!(system_drive(Some(r"\\server")), r"C:\");
+    }
+
+    /// `g /` opens the Places card, the drives on it standing for the root
+    /// a Windows machine does not have.
+    #[test]
+    fn g_slash_is_the_places_card() {
+        let km = Registry::defaults();
+        let seq = parse_sequence("g /").expect("chord");
+        assert_eq!(
+            km.holder(Context::Files, &seq).map(|b| b.command),
+            Some(Command::MountManager)
         );
     }
 

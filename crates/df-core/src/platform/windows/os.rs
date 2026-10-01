@@ -30,6 +30,11 @@ pub const MAX_NAME: usize = 255;
 /// here, so `é` costs one and `🎬` two, where UTF-8 would say two and four.
 pub const NAME_IN_UTF16: bool = true;
 
+/// Whether a place under home is shown from `~`: no — Explorer, the address
+/// bar and every dialog write `C:\Users\admin\Downloads`, and `~` is a Unix
+/// shell's (04-windows.md W4.40).
+pub const HOME_AS_TILDE: bool = false;
+
 /// The UTF-8 of `s`, or a refusal when it is not valid Unicode.
 pub fn as_bytes(s: &OsStr) -> Result<Cow<'_, [u8]>> {
     s.to_str()

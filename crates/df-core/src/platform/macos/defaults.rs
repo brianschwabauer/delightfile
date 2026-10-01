@@ -146,6 +146,14 @@ pub const BOOKMARKS: &[(&str, &str, &str)] = &[
     ("o", "~/Documents", "Go to ~/Documents"),
 ];
 
+/// The `g` bookmarks a fresh install ships: [`BOOKMARKS`] as it stands.
+pub fn bookmarks() -> Vec<crate::config::Bookmark> {
+    BOOKMARKS
+        .iter()
+        .map(|(key, path, description)| crate::config::Bookmark::row(key, path, description))
+        .collect()
+}
+
 /// Rows laid over the shipped keymap, before the user's `keymap.toml`:
 /// context, keys, command id, description (05-defaults-and-config.md §3).
 ///

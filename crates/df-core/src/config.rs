@@ -906,11 +906,28 @@ pub struct Bookmark {
     /// Written as configured, `~` and all, so `$HOME` can move under it.
     pub path: String,
     pub description: String,
+    /// What the Places card calls it, where the shipped table names it —
+    /// Windows' "Home" for a profile folder whose own name is the user's,
+    /// "AppData" for `AppData\Roaming`. `None`, which every `[goto]` row a
+    /// person writes is: the folder's own name.
+    pub name: Option<String>,
 }
 
 impl Bookmark {
-    /// The path with a leading `~` replaced by `$HOME`. Left alone when there
-    /// is no `$HOME` or the path is a URL (`sftp://…`), which the vfs resolves.
+    /// A row of a shipped table: key, path, description, and no name of its
+    /// own.
+    pub fn row(key: &str, path: &str, description: &str) -> Bookmark {
+        Bookmark {
+            key: key.to_string(),
+            path: path.to_string(),
+            description: description.to_string(),
+            name: None,
+        }
+    }
+
+    /// The path with a leading `~` replaced by `$HOME`, in the platform's
+    /// separator. Left alone when there is no `$HOME` or the path is a URL
+    /// (`sftp://…`), which the vfs resolves.
     pub fn expanded_path(&self) -> String {
         expand_home(&self.path)
     }
@@ -923,16 +940,9 @@ impl Bookmark {
 pub use crate::path::expand_home;
 
 /// The shipped bookmark table, as [`Bookmark`]s: the platform's
-/// ([`crate::platform::defaults::BOOKMARKS`]).
+/// ([`crate::platform::defaults::bookmarks`]).
 pub fn default_bookmarks() -> Vec<Bookmark> {
-    crate::platform::defaults::BOOKMARKS
-        .iter()
-        .map(|(key, path, description)| Bookmark {
-            key: (*key).to_string(),
-            path: (*path).to_string(),
-            description: (*description).to_string(),
-        })
-        .collect()
+    crate::platform::defaults::bookmarks()
 }
 
 /// A named way to open a file (PLAN §6).
@@ -1177,11 +1187,11 @@ impl Config {
                 match entry.value.as_str() {
                     // Said in the platform's separator, as it is gone to:
                     // `C:/Work` is `C:\Work` on Windows' which-key card.
-                    Some(path) => bookmarks.push(Bookmark {
-                        key: entry.key.clone(),
-                        path: path.to_string(),
-                        description: format!("Go to {}", crate::path::native(path)),
-                    }),
+                    Some(path) => bookmarks.push(Bookmark::row(
+                        &entry.key,
+                        path,
+                        &format!("Go to {}", crate::path::native(path)),
+                    )),
                     None => warnings.push(ConfigWarning::new(
                         file,
                         entry.line,
@@ -2938,11 +2948,7 @@ mod tests {
 
     #[test]
     fn bookmarks_expand_a_leading_tilde() {
-        let b = Bookmark {
-            key: "w".to_string(),
-            path: "~/Work".to_string(),
-            description: String::new(),
-        };
+        let b = Bookmark::row("w", "~/Work", "");
         let expanded = b.expanded_path();
         assert!(
             expanded.ends_with(&format!("{}Work", std::path::MAIN_SEPARATOR)),
@@ -2950,11 +2956,7 @@ mod tests {
         );
         assert!(!expanded.starts_with('~'));
         // A URL is left for the vfs to resolve.
-        let b = Bookmark {
-            key: "1".to_string(),
-            path: "sftp://showandtour1".to_string(),
-            description: String::new(),
-        };
+        let b = Bookmark::row("1", "sftp://showandtour1", "");
         assert_eq!(b.expanded_path(), "sftp://showandtour1");
     }
 }

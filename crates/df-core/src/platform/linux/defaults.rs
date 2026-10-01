@@ -9,8 +9,21 @@ pub use crate::config::{
 
 /// The openers a fresh install ships, one command per row: [`OPENERS`] as
 /// it stands (Windows picks among candidates here).
-pub fn openers() -> Vec<(&'static str, &'static str, bool, &'static str)> {
-    OPENERS.to_vec()
+pub fn openers() -> Vec<(&'static str, String, bool, &'static str)> {
+    OPENERS
+        .iter()
+        .map(|(id, command, block, description)| {
+            (*id, (*command).to_string(), *block, *description)
+        })
+        .collect()
+}
+
+/// The `g` bookmarks a fresh install ships: [`BOOKMARKS`] as it stands.
+pub fn bookmarks() -> Vec<crate::config::Bookmark> {
+    BOOKMARKS
+        .iter()
+        .map(|(key, path, description)| crate::config::Bookmark::row(key, path, description))
+        .collect()
 }
 
 /// Rows the platform lays over the shipped keymap: none. Linux's keymap is

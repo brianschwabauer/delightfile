@@ -346,11 +346,26 @@ fn place_row(path: &Path, label: Option<String>, home: Option<&Path>) -> Row {
 /// nothing. `~` says the same thing in one character, and the painter dims what
 /// is left of the directory part so the eye lands on the last component.
 ///
-/// The boundary is either separator on Windows, where the rest keeps the
-/// separator the path was spelled with — `~\Work` for a path off a listing
-/// (`plans/other-platforms/04-windows.md` W4.11); on Linux the one separator
-/// is `/` and this is the text it always was.
+/// Only where `~` is how a person on this platform writes home
+/// ([`df_core::platform::os::HOME_AS_TILDE`]). On Windows it is not — `~` is
+/// a Unix shell's, and Explorer, the address bar and every dialog say
+/// `C:\Users\admin\Downloads` — so there a place is shown as its whole path
+/// (`plans/other-platforms/04-windows.md` W4.40), which is also what the
+/// Places card and the which-key card say. [`tilde`] is the shortening
+/// itself, for what is written down rather than shown.
 pub fn shorten_home(path: &Path, home: Option<&Path>) -> String {
+    if df_core::platform::os::HOME_AS_TILDE {
+        tilde(path, home)
+    } else {
+        df_core::path::display(path)
+    }
+}
+
+/// `path` under `home` written from `~`, on every platform: `~/Work`, and on
+/// Windows `~\Work` for a path off a listing, whose separator is kept
+/// (W4.11). For a pin in the state file, which is written so that it reads
+/// the same wherever the file goes; what a list shows is [`shorten_home`].
+pub fn tilde(path: &Path, home: Option<&Path>) -> String {
     let text = path.to_string_lossy();
     let Some(home) = home else {
         return text.into_owned();
@@ -640,6 +655,7 @@ mod tests {
             key: key.to_string(),
             path: path.to_string(),
             description: description.to_string(),
+            name: None,
         }
     }
 
@@ -726,33 +742,45 @@ mod tests {
     #[test]
     fn the_home_prefix_shortens_only_whole_components() {
         let home = Some(Path::new("/home/brian"));
-        assert_eq!(shorten_home(Path::new("/home/brian"), home), "~");
-        assert_eq!(shorten_home(Path::new("/home/brian/Work"), home), "~/Work");
+        assert_eq!(tilde(Path::new("/home/brian"), home), "~");
+        assert_eq!(tilde(Path::new("/home/brian/Work"), home), "~/Work");
         assert_eq!(
-            shorten_home(Path::new("/home/brianne/Work"), home),
+            tilde(Path::new("/home/brianne/Work"), home),
             "/home/brianne/Work"
         );
-        assert_eq!(shorten_home(Path::new("/etc"), None), "/etc");
+        assert_eq!(tilde(Path::new("/etc"), None), "/etc");
+        if cfg!(unix) {
+            assert_eq!(shorten_home(Path::new("/home/brian/Work"), home), "~/Work");
+        }
     }
 
     /// The same on Windows, where the home is `%USERPROFILE%` and a path
-    /// off a listing is spelled with `\` (W4.11).
+    /// off a listing is spelled with `\` (W4.11) — and where a list shows
+    /// the whole path, `~` being no Windows spelling (W4.40).
     #[test]
     fn the_home_prefix_shortens_on_windows() {
         if !cfg!(windows) {
             return;
         }
         let home = Some(Path::new(r"C:\Users\brian"));
-        assert_eq!(shorten_home(Path::new(r"C:\Users\brian"), home), "~");
+        assert_eq!(tilde(Path::new(r"C:\Users\brian"), home), "~");
         assert_eq!(
-            shorten_home(Path::new(r"C:\Users\brian\Work\x"), home),
+            tilde(Path::new(r"C:\Users\brian\Work\x"), home),
             r"~\Work\x"
         );
         assert_eq!(
-            shorten_home(Path::new(r"C:\Users\brianne\Work"), home),
+            tilde(Path::new(r"C:\Users\brianne\Work"), home),
             r"C:\Users\brianne\Work"
         );
-        assert_eq!(shorten_home(Path::new(r"D:\Photos"), home), r"D:\Photos");
+        assert_eq!(tilde(Path::new(r"D:\Photos"), home), r"D:\Photos");
+        assert_eq!(
+            shorten_home(Path::new(r"C:\Users\brian\Downloads"), home),
+            r"C:\Users\brian\Downloads"
+        );
+        assert_eq!(
+            shorten_home(Path::new(r"C:\Users\brian"), home),
+            r"C:\Users\brian"
+        );
     }
 
     /// `↑` from the top is the bottom. The one wrapping list in the program,

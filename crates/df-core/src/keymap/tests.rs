@@ -875,6 +875,7 @@ fn user_bookmarks_rebuild_the_goto_chords() {
         key: "m".to_string(),
         path: "/mnt".to_string(),
         description: "Go to /mnt".to_string(),
+        name: None,
     }];
     let warnings = km.apply_bookmarks(&bookmarks, Path::new("delightfile.toml"));
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -884,7 +885,7 @@ fn user_bookmarks_rebuild_the_goto_chords() {
     );
     // The shipped chords are gone, since the table replaced them.
     assert_eq!(
-        press(&km, &files(), WhenFlags::NONE, "g w"),
+        press(&km, &files(), WhenFlags::NONE, "g d"),
         Dispatch::NoMatch
     );
     // …but the goto chords that are not bookmarks stayed.
@@ -899,6 +900,7 @@ fn bookmark(key: &str, path: &str) -> crate::config::Bookmark {
         key: key.to_string(),
         path: path.to_string(),
         description: format!("Go to {path}"),
+        name: None,
     }
 }
 
@@ -974,7 +976,7 @@ fn the_pin_layer_takes_no_key_from_anything() {
     let base = Registry::defaults();
     let first = crate::config::default_bookmarks().len();
     let pins = vec![
-        bookmark("w", "/pinned/work"),
+        bookmark("h", "/pinned/home"),
         bookmark("g", "/pinned/top"),
         bookmark("space", "/pinned/space"),
         bookmark("x", "/pinned/x"),
@@ -987,7 +989,7 @@ fn the_pin_layer_takes_no_key_from_anything() {
         assert_eq!(
             refused,
             vec![
-                KeymapError::Conflict("g w".to_string()),
+                KeymapError::Conflict("g h".to_string()),
                 KeymapError::Conflict("g g".to_string()),
                 KeymapError::Conflict("g Space".to_string()),
                 KeymapError::Conflict("g x".to_string()),
@@ -995,8 +997,8 @@ fn the_pin_layer_takes_no_key_from_anything() {
         );
         let at = |keys: &str| press(&km, &files(), WhenFlags::NONE, keys);
         assert_eq!(
-            at("g w"),
-            Dispatch::Match(Command::Goto(3)),
+            at("g h"),
+            Dispatch::Match(Command::Goto(0)),
             "[goto] kept it"
         );
         assert_eq!(at("g g"), Dispatch::Match(Command::CursorTop));

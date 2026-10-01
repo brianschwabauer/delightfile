@@ -108,6 +108,7 @@ pub(super) fn goto_table(config: &[Bookmark], pins: &[Pin], home: Option<&Path>)
             key: pin.key.clone()?,
             path: pin.path.clone(),
             description: format!("Go to {}", said(&pin.path, home)),
+            name: None,
         })
     }));
     table
@@ -207,7 +208,7 @@ fn said(written: &str, home: Option<&Path>) -> String {
 /// ([`df_core::path::expand_home`] takes it either way); elsewhere a path is
 /// written as the platform spells it (W4.11).
 pub(super) fn written(dir: &Path, home: Option<&Path>) -> String {
-    let written = finder::shorten_home(dir, home);
+    let written = finder::tilde(dir, home);
     if written.starts_with('~') {
         return df_core::path::with_slashes(&written).into_owned();
     }
@@ -228,6 +229,9 @@ pub(super) struct Place {
     pub pinned: bool,
     /// A `[goto]` row's own words.
     pub description: Option<String>,
+    /// What a `[goto]` row of the shipped table calls it, where that is not
+    /// its folder's name (Windows' "Home", "AppData", W4.40).
+    pub name: Option<String>,
     /// The home row the list ends on when nothing above it was home. Not a
     /// pin and not a bookmark, so the Places card, which lists those, leaves
     /// it out.
@@ -276,6 +280,7 @@ pub(super) fn pool(config: &[Bookmark], pins: &[Pin], home: Option<&Path>) -> Ve
                 slot,
                 pinned: true,
                 description: None,
+                name: None,
                 fallback: false,
             });
         }
@@ -289,6 +294,7 @@ pub(super) fn pool(config: &[Bookmark], pins: &[Pin], home: Option<&Path>) -> Ve
                 slot: u8::try_from(index).ok(),
                 pinned: false,
                 description: Some(bookmark.description.clone()),
+                name: bookmark.name.clone(),
                 fallback: false,
             });
         }
@@ -300,6 +306,7 @@ pub(super) fn pool(config: &[Bookmark], pins: &[Pin], home: Option<&Path>) -> Ve
             slot: None,
             pinned: false,
             description: None,
+            name: None,
             fallback: true,
         });
     }
@@ -330,7 +337,8 @@ pub(super) fn finder_rows(
 }
 
 /// The Places card's Places section: the list without its home fallback,
-/// each row the folder's name, then where it is — `~` for home — and its `g`
+/// each row the folder's name — or the name the shipped table gives it — then
+/// where it is — `~` for home where `~` is how home is written — and its `g`
 /// key when it has one.
 pub(super) fn card_places(
     pool: &[Place],
@@ -342,7 +350,7 @@ pub(super) fn card_places(
         .map(|place| {
             let label = place.label(home);
             crate::mounts::Place {
-                name: folder_name(&label),
+                name: place.name.clone().unwrap_or_else(|| folder_name(&label)),
                 detail: label,
                 key: place.key(keymap),
                 target: place.target.clone(),
@@ -650,6 +658,7 @@ mod tests {
             key: key.to_string(),
             path: path.to_string(),
             description: format!("Go to {path}"),
+            name: None,
         }
     }
 

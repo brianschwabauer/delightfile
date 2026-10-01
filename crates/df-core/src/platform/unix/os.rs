@@ -33,6 +33,10 @@ pub const MAX_NAME: usize = 255;
 /// Whether [`MAX_NAME`] counts UTF-16 code units: no, bytes.
 pub const NAME_IN_UTF16: bool = false;
 
+/// Whether a place under home is shown from `~` (`~/Work`): yes, the way a
+/// Unix shell and every Unix program writes it.
+pub const HOME_AS_TILDE: bool = true;
+
 /// The bytes of `s`, exactly as the kernel has them. Never an error here.
 pub fn as_bytes(s: &OsStr) -> Result<Cow<'_, [u8]>> {
     Ok(Cow::Borrowed(s.as_bytes()))
