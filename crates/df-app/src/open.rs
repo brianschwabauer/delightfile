@@ -73,7 +73,7 @@ pub fn run(
 pub const SHELL_OPEN_BUILTIN: &str = "shell-open";
 
 /// The builtin that is the system's own "Open with" chooser
-/// (`builtin:shell-open-with`, Windows' `openas` verb, W4.41).
+/// (`builtin:shell-open-with`, Windows' `SHOpenWithDialog`, W4.41).
 pub const SHELL_OPEN_WITH_BUILTIN: &str = "shell-open-with";
 
 /// The builtin that installs a font for this user (`builtin:font-install`):

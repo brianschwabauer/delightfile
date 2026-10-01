@@ -33,6 +33,10 @@
 //! thread has it already (winit starts OLE there), and a pool thread — the
 //! connect prompt's — is given it and has it taken away again.
 //!
+//! **`builtin:shell-open-with` is `SHOpenWithDialog`** (W4.41): the
+//! chooser Explorer's "Choose another app" shows, put up from a thread of
+//! its own, since it waits to be answered.
+//!
 //! **`builtin:font-install` is the shell's `install` verb** (W4.43), through
 //! `ShellExecuteExW`, the one that can be told to wait: Explorer's "Install"
 //! on a font, which installs it for this user. A Windows without the verb
@@ -157,12 +161,65 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
     shell_execute(target, "open")
 }
 
-/// Windows' own "Open with" chooser for `target`: the shell's `openas`
-/// verb (`builtin:shell-open-with`, W4.41). Not `rundll32
-/// shell32.dll,OpenAs_RunDLL "$1"`, the first form: on the VM it showed
-/// nothing for a file whose name has a space, the path reaching it quoted.
+/// How long the chooser's thread is listened to for a failure before the
+/// window goes on: a refusal comes at once, the chooser itself stays up
+/// until it is answered.
+const OPEN_WITH_HEARD: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Windows' own "Open with" chooser for `target` (`builtin:shell-open-with`,
+/// W4.41): `SHOpenWithDialog`, the "Select an app to open this file" that
+/// Explorer's "Choose another app" shows, with its Always and Just once
+/// (`OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC`), the chosen
+/// program opening the file.
+///
+/// The chooser is modal and waits to be answered, so it is put up from a
+/// thread of its own, given COM, with no owner window, and the window does
+/// not wait on it; what it says in its first [`OPEN_WITH_HEARD`] — a
+/// refusal — is this call's error, and closing it unanswered is no error.
+/// Neither `rundll32 shell32.dll,OpenAs_RunDLL "$1"`, the brief's form, nor
+/// `ShellExecuteW(…, "openas", …)` showed a chooser on the VM, where
+/// Explorer's own did (§5.8).
 pub fn shell_open_with(target: &OsStr) -> io::Result<()> {
-    shell_execute(target, "openas")
+    use windows_sys::Win32::UI::Shell::{
+        SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_REGISTER_EXT, OPENASINFO,
+    };
+    /// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: the chooser closed unanswered.
+    const CANCELLED: i32 = 0x8007_04C7_u32 as i32;
+    let file: Vec<u16> = target.encode_wide().chain(Some(0)).collect();
+    let (sender, heard) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("open-with".into())
+        .spawn(move || {
+            // SAFETY: as in `shell_execute`: a per-thread start, balanced
+            // below on this thread, which is new and in no model yet.
+            let com = unsafe {
+                CoInitializeEx(
+                    std::ptr::null(),
+                    (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+                )
+            };
+            let info = OPENASINFO {
+                pcszFile: file.as_ptr(),
+                pcszClass: std::ptr::null(),
+                oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC,
+            };
+            // SAFETY: `info` and the NUL-terminated path it points at
+            // outlive the call; no owner window, a null class (the file's
+            // own).
+            let result = unsafe { SHOpenWithDialog(0, &info) };
+            if com >= 0 {
+                // SAFETY: balances the start counted above.
+                unsafe { CoUninitialize() };
+            }
+            // The window may have stopped listening long ago.
+            let _ = sender.send(result);
+        })?;
+    match heard.recv_timeout(OPEN_WITH_HEARD) {
+        Ok(result) if result < 0 && result != CANCELLED => {
+            Err(io::Error::from_raw_os_error(result))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `verb` on `target` through `ShellExecuteW`.
