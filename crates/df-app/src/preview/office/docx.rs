@@ -38,6 +38,16 @@
 //! under each new item above it. A bullet is `•` at every level, as it is in
 //! rendered markdown: the indent is what shows the depth.
 //!
+//! **Drawings are read through.** A picture in one is its `a:blip`, which
+//! leaves the picture marker; a chart or a plain shape leaves nothing. A text
+//! box in one (`w:txbxContent`) is paragraphs of the document's own — a cover
+//! page's title, subtitle and author are all text boxes — so the paragraph the
+//! drawing sits in is set aside, the box is read as blocks, and the paragraph
+//! carries on when the box ends, written out after it. A VML picture and an
+//! embedded object, the older forms, are a marker each with their insides
+//! skipped, and only the first of a writer's two alternatives is read, so a
+//! text box offered both ways is read once.
+//!
 //! **What is not the text is skipped.** Tracked deletions and moves away, a
 //! field's code (`PAGE`, `HYPERLINK "…"`) as opposed to the result it shows,
 //! the old formatting a tracked change records, and the fallback half of an
@@ -548,6 +558,20 @@ struct Body<'a> {
     /// Tables open around the current paragraph.
     tables: usize,
     table: Table,
+    /// The paragraphs, innermost last, that a text box being read interrupted.
+    boxes: Vec<Outer>,
+}
+
+/// What a text box interrupts: the paragraph its drawing sits in and the run
+/// the drawing is part of, as they were when the box began.
+struct Outer {
+    paragraph: Option<Paragraph>,
+    run: Style,
+    run_bold: Option<bool>,
+    run_style: Option<String>,
+    in_run: bool,
+    in_text: bool,
+    links: usize,
 }
 
 impl<'a> Body<'a> {
@@ -570,6 +594,7 @@ impl<'a> Body<'a> {
             links: 0,
             tables: 0,
             table: Table::default(),
+            boxes: Vec::new(),
         }
     }
 
@@ -650,17 +675,16 @@ impl<'a> Body<'a> {
             }
             "cr" if self.in_run => self.text("\n"),
             "noBreakHyphen" if self.in_run => self.text("-"),
-            "drawing" | "pict" | "object" => {
-                let style = if self.in_run {
-                    self.run
-                } else {
-                    Style::default()
-                };
-                if let Some(paragraph) = &mut self.paragraph {
-                    picture(&mut paragraph.spans, style);
-                }
+            // A drawing is read through: its picture is its `a:blip`, and a
+            // text box in it is paragraphs of the document's own.
+            "blip" => self.picture(),
+            // The older forms, VML pictures and embedded objects, are a
+            // picture each, whatever text they hold.
+            "pict" | "object" => {
+                self.picture();
                 self.skipping = 1;
             }
+            "txbxContent" => self.open_box(),
             "hyperlink" => self.links += 1,
             "tbl" => {
                 self.tables += 1;
@@ -683,6 +707,7 @@ impl<'a> Body<'a> {
 
     fn end(&mut self, name: &str, out: &mut Out) {
         match name {
+            "txbxContent" => self.close_box(),
             "p" => self.end_paragraph(out),
             "pPr" => self.in_paragraph_properties = false,
             "numPr" => self.in_numbering = false,
@@ -719,6 +744,51 @@ impl<'a> Body<'a> {
             }
             _ => {}
         }
+    }
+
+    /// The picture marker, in the current paragraph.
+    fn picture(&mut self) {
+        let style = if self.in_run {
+            self.run
+        } else {
+            Style::default()
+        };
+        if let Some(paragraph) = &mut self.paragraph {
+            picture(&mut paragraph.spans, style);
+        }
+    }
+
+    /// A text box begins. Its paragraphs are read as the document's own — a
+    /// cover page's title, subtitle and author are all in text boxes — so
+    /// the paragraph its drawing sits in is set aside until the box ends.
+    fn open_box(&mut self) {
+        self.boxes.push(Outer {
+            paragraph: self.paragraph.take(),
+            run: self.run,
+            run_bold: self.run_bold.take(),
+            run_style: self.run_style.take(),
+            in_run: self.in_run,
+            in_text: self.in_text,
+            links: self.links,
+        });
+        self.run = Style::default();
+        self.in_run = false;
+        self.in_text = false;
+        self.links = 0;
+    }
+
+    /// The text box ends, and the paragraph it interrupted carries on.
+    fn close_box(&mut self) {
+        let Some(outer) = self.boxes.pop() else {
+            return;
+        };
+        self.paragraph = outer.paragraph;
+        self.run = outer.run;
+        self.run_bold = outer.run_bold;
+        self.run_style = outer.run_style;
+        self.in_run = outer.in_run;
+        self.in_text = outer.in_text;
+        self.links = outer.links;
     }
 
     /// Text in the current run.
@@ -1254,15 +1324,24 @@ mod tests {
         );
     }
 
+    /// A drawing's picture is its blip: one marker each, two side by side
+    /// with a space between, the older VML form a marker too, and one marker
+    /// for a picture offered both ways.
     #[test]
     fn a_picture_is_the_image_marker_once_and_two_are_two() {
-        let body = r#"<w:p>
+        let blip = r#"<w:drawing><wp:inline><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="pic"><pic:pic><pic:nvPicPr/><pic:blipFill><a:blip r:embed="rId5"><a:extLst/></a:blip></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+        let body = format!(
+            r#"<w:p>
             <w:r><w:t xml:space="preserve">See </w:t></w:r>
-            <w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData><pic:pic/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
-            <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:txbx><w:txbxContent><w:p><w:r><w:t>box text</w:t></w:r></w:p></w:txbxContent></wps:txbx></w:drawing></mc:Choice>
-              <mc:Fallback><w:pict><v:textbox><w:txbxContent><w:p><w:r><w:t>box text</w:t></w:r></w:p></w:txbxContent></v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>
+            <w:r>{blip}</w:r>
+            <w:r><mc:AlternateContent><mc:Choice Requires="wp14">{blip}</mc:Choice><mc:Fallback><w:pict><v:shape><v:imagedata r:id="rId5"/></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>
+            <w:r><w:t xml:space="preserve"> and </w:t></w:r>
+            <w:r><w:pict><v:shape><v:imagedata r:id="rId6"/></v:shape></w:pict></w:r>
+            <w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="chart"><c:chart r:id="rId7"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
             <w:r><w:t xml:space="preserve"> here.</w:t></w:r>
-            </w:p>"#;
+            </w:p>"#
+        );
+        let body = body.as_str();
         let marker = Style {
             code: true,
             ..Style::default()
@@ -1272,8 +1351,38 @@ mod tests {
             vec![Block::Paragraph(vec![
                 span("See "),
                 styled("🖼 image 🖼 image", marker),
+                span(" and "),
+                styled("🖼 image", marker),
                 span(" here."),
             ])]
+        );
+    }
+
+    /// A cover page: the title, subtitle and author are text boxes in a
+    /// drawing, offered as a DrawingML shape and again as VML. Their
+    /// paragraphs are read once, as the document's own, and the paragraph the
+    /// drawing sat in carries on after them.
+    #[test]
+    fn a_text_box_is_read_as_its_paragraphs() {
+        let paragraphs = r#"<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Annual Report</w:t></w:r></w:p>
+            <w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Prepared by Ada</w:t></w:r></w:p>"#;
+        let body = format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r>
+            <w:r><mc:AlternateContent>
+              <mc:Choice Requires="wps"><w:drawing><wp:anchor><wp:docPr id="2" name="Text Box 2"/><a:graphic><a:graphicData uri="wps"><wps:wsp><wps:spPr/><wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>
+              <mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent>{paragraphs}</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback>
+            </mc:AlternateContent></w:r>
+            <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">after</w:t></w:r></w:p>"#
+        );
+        assert_eq!(
+            docx(&body, None, None),
+            vec![
+                heading(1, "Annual Report"),
+                Block::Gap,
+                Block::Paragraph(vec![styled("Prepared by Ada", ITALIC)]),
+                Block::Gap,
+                Block::Paragraph(vec![span("Before "), styled("after", BOLD)]),
+            ]
         );
     }
 
