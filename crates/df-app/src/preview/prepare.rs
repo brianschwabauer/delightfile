@@ -12,6 +12,11 @@
 //!   worth. Cheap per line, and 20 000 of them is not cheap.
 //! - [`crate::preview::markdown::parse`] — up to a mebibyte of source into
 //!   blocks.
+//! - [`crate::preview::office::read`] — a Word, PowerPoint or Excel file's
+//!   parts inflated and read into the same blocks. This one does its own read
+//!   as well: df-core cannot, having no zip of XML it knows how to turn into
+//!   anything, so it hands over the path, and the inflate and the scan both
+//!   happen here, off the frame, behind the same token.
 //!
 //! Both used to run inside `Pane::body_for`, which runs inside `poll`, which
 //! runs inside a frame. A held `↓` down a directory of source files therefore
@@ -33,7 +38,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use df_core::fs::Notifier;
 use df_core::preview::PreviewToken;
 
-use super::{highlight, markdown};
+use super::{highlight, markdown, office};
 
 /// What the pane hands over: exactly what df-core sent, unchanged.
 pub enum Source {
@@ -45,6 +50,10 @@ pub enum Source {
     Markdown {
         source: String,
         truncated: bool,
+    },
+    /// An Office file, by path: the worker reads it ([`office::read`]).
+    Office {
+        path: std::path::PathBuf,
     },
 }
 
@@ -208,6 +217,22 @@ pub fn prepare(source: Source) -> Ready {
             blocks: markdown::parse(&source),
             truncated,
         },
+        Source::Office { path } => match office::read(&path) {
+            Ok(reading) => Ready::Markdown {
+                blocks: reading.blocks,
+                truncated: reading.truncated,
+            },
+            // The one line the pane has for a file it could not read, in the
+            // body the file would have had: "not a Word, PowerPoint or Excel
+            // file", "malformed zip: …".
+            Err(message) => Ready::Markdown {
+                blocks: vec![markdown::Block::Paragraph(vec![markdown::Span {
+                    text: message,
+                    style: markdown::Style::default(),
+                }])],
+                truncated: false,
+            },
+        },
     }
 }
 
@@ -268,6 +293,34 @@ mod tests {
         println!("markdown::parse into {} blocks: {took:?}", blocks.len());
         assert!(!blocks.is_empty());
         assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    /// An Office file that will not read is still a body: the one line that
+    /// says why, where its text would have been.
+    #[test]
+    fn an_office_file_that_will_not_read_says_why_in_its_body() {
+        let tree = df_core::test_support::TempTree::new("prepare-office-failure");
+        let path = tree.file("report.docx", b"not a zip at all, whatever its name says");
+        let Ready::Markdown { blocks, truncated } = prepare(Source::Office { path }) else {
+            panic!("an Office source comes back as markdown");
+        };
+        assert!(!truncated);
+        let [markdown::Block::Paragraph(spans)] = blocks.as_slice() else {
+            panic!("one paragraph: {blocks:?}");
+        };
+        assert!(spans[0].text.starts_with("malformed zip"), "{spans:?}");
+
+        let missing = tree.join("gone.xlsx");
+        let Ready::Markdown { blocks, .. } = prepare(Source::Office { path: missing }) else {
+            panic!("an Office source comes back as markdown");
+        };
+        let [markdown::Block::Paragraph(spans)] = blocks.as_slice() else {
+            panic!("one paragraph: {blocks:?}");
+        };
+        // The system's own words, said quietly: lower-case, no "(os error 2)".
+        let text = &spans[0].text;
+        assert!(!text.is_empty() && !text.contains("os error"), "{text}");
+        assert!(!text.starts_with(char::is_uppercase), "{text}");
     }
 
     /// Cancellation is the token, and the token is checked twice. This is the

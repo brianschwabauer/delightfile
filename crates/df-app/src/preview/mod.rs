@@ -79,6 +79,7 @@ pub mod gesture;
 pub mod highlight;
 pub mod listing;
 pub mod markdown;
+pub mod office;
 mod paint;
 pub mod prepare;
 
