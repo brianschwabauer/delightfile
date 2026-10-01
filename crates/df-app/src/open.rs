@@ -87,8 +87,9 @@ pub enum FontInstall {
     /// The verb ran and the font is in a fonts folder now.
     Installed,
     /// The verb ran and said yes, and the font is not in a fonts folder
-    /// yet: the shell's own "replace it?" may still be up.
-    Asked,
+    /// `waited` later: the shell's own "replace it?" may still be up, or
+    /// the verb did nothing.
+    Asked { waited: std::time::Duration },
     /// This Windows has no `install` verb for the file, so it was opened
     /// in its default program, the Font Viewer, instead.
     Previewed,
@@ -109,6 +110,7 @@ pub fn install_font(path: &std::path::Path) -> std::io::Result<FontInstall> {
                 .any(|dir| dir.join(name).is_file())
         })
     };
+    let start = std::time::Instant::now();
     if !crate::platform::open::install_verb(path, &installed)? {
         shell_open(path.as_os_str())?;
         return Ok(FontInstall::Previewed);
@@ -116,7 +118,9 @@ pub fn install_font(path: &std::path::Path) -> std::io::Result<FontInstall> {
     Ok(if installed() {
         FontInstall::Installed
     } else {
-        FontInstall::Asked
+        FontInstall::Asked {
+            waited: start.elapsed(),
+        }
     })
 }
 

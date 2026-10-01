@@ -5125,9 +5125,10 @@ impl App {
             let job = FnJob::new(format!("Install {name}"), Lane::Micro, move |_ctx| {
                 let result = match open::install_font(&path) {
                     Ok(open::FontInstall::Installed) => Ok(format!("Installed {name}")),
-                    Ok(open::FontInstall::Asked) => {
-                        Ok(format!("Windows was asked to install {name}"))
-                    }
+                    Ok(open::FontInstall::Asked { waited }) => Err(format!(
+                        "Windows was asked to install {name}, and {} s later it is not in a fonts folder",
+                        waited.as_secs()
+                    )),
                     Ok(open::FontInstall::Previewed) => Ok(format!(
                         "Opened {name} in the Font Viewer: this Windows has no Install for it"
                     )),
@@ -5137,11 +5138,17 @@ impl App {
                     message,
                     ..RemoteDone::default()
                 });
+                // A font that did not go in is the task's failure too, so
+                // the tasks panel says why after the toast has gone.
+                let failed = result.as_ref().err().cloned();
                 match job_slot.lock() {
                     Ok(mut guard) => *guard = Some(result),
                     Err(poisoned) => *poisoned.into_inner() = Some(result),
                 }
-                Ok(())
+                match failed {
+                    Some(message) => Err(df_core::DfError::Op(message)),
+                    None => Ok(()),
+                }
             });
             let id = self.engine.spawn(job);
             // A job whose result is a message, as the bin's emptying is.

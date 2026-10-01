@@ -246,8 +246,13 @@ enum VerbError {
 /// `verb` on `target` through `ShellExecuteExW`, seen through: the call
 /// (`SEE_MASK_NOASYNC`), then this thread's apartment kept and its messages
 /// pumped until `done`, the end of a process the verb started, or `wait`.
-/// The shell's own error dialogs are off (`SEE_MASK_FLAG_NO_UI`): the window
-/// says what went wrong.
+/// The verb is looked for in the item's own shortcut menu
+/// (`SEE_MASK_INVOKEIDLIST`), its handlers included, as Explorer's menu and
+/// `FolderItem.InvokeVerb` find it, not only among the type's registry
+/// verbs. The verb may show what it shows — Explorer's Install puts up its
+/// own progress and its "replace it?", the shell its warning for a file
+/// from another zone — so `SEE_MASK_FLAG_NO_UI`, under which a handler may
+/// do nothing rather than ask, is not set.
 fn shell_verb(
     target: &OsStr,
     verb: &str,
@@ -259,7 +264,7 @@ fn shell_verb(
     };
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
     use windows_sys::Win32::UI::Shell::{
-        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
+        ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
         SHELLEXECUTEINFOW,
     };
     let wide = |text: &OsStr| -> Vec<u16> { text.encode_wide().chain(Some(0)).collect() };
@@ -276,7 +281,7 @@ fn shell_verb(
     // handles, no flags.
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
+    info.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS | SEE_MASK_INVOKEIDLIST;
     info.lpVerb = verb.as_ptr();
     info.lpFile = file.as_ptr();
     info.nShow = SW_SHOWNORMAL;
