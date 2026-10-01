@@ -758,7 +758,10 @@ const COLUMN_FLOOR: f32 = BODY * 4.0;
 
 /// The share of the pane one column may ask for. A column of sentences laid
 /// out on one line would be as wide as its longest sentence; capping it at half
-/// the pane is what leaves the columns beside it room to be read.
+/// the pane is what leaves the columns beside it room to be read. The cap only
+/// decides who gives way: whatever width the other columns leave unused goes
+/// back to the capped column, so a short key beside a long description, or a
+/// table of one column, still uses the whole pane.
 const COLUMN_SHARE: f32 = 0.5;
 
 /// How many body rows the column widths are measured from.
@@ -791,10 +794,36 @@ const WRAP_SLACK: f32 = 1.0;
 /// less), the columns already at their floor dropping out of the sharing. If
 /// even the floors do not fit, the floors are returned, and the table runs off
 /// the pane's right edge, where the clip cuts it.
+///
+/// Last, any width the pane still has spare goes back to the columns the cap
+/// cut, each getting a share in proportion to what the cap took from it, so
+/// none is given more than its own natural width. A column the cap never
+/// touched gets nothing back, which is what keeps a table that fits from
+/// stretching.
 fn column_widths(natural: &[f32], available: f32) -> Vec<f32> {
     let available = available.max(0.0);
+    let natural: Vec<f32> = natural.iter().map(|w| w.max(0.0)).collect();
+    let mut widths = fit_columns(&natural, available);
+    let spare = available - widths.iter().sum::<f32>();
     let cap = available * COLUMN_SHARE;
-    let asked: Vec<f32> = natural.iter().map(|w| w.max(0.0).min(cap)).collect();
+    let cut: Vec<f32> = natural.iter().map(|want| want - want.min(cap)).collect();
+    let cut_total: f32 = cut.iter().sum();
+    if spare > 0.0 && cut_total > 0.0 {
+        // Never more than the cap took in all, so no column's share can take
+        // it past its natural width.
+        let back = spare.min(cut_total);
+        for (width, cut) in widths.iter_mut().zip(&cut) {
+            *width += back * cut / cut_total;
+        }
+    }
+    widths
+}
+
+/// [`column_widths`] before the spare width is given back: the cap, then the
+/// shrink to the pane with its floors.
+fn fit_columns(natural: &[f32], available: f32) -> Vec<f32> {
+    let cap = available * COLUMN_SHARE;
+    let asked: Vec<f32> = natural.iter().map(|w| w.min(cap)).collect();
     if asked.iter().sum::<f32>() <= available {
         return asked;
     }
@@ -2841,11 +2870,31 @@ mod tests {
         widths_are(column_widths(&[100.0, 0.0], 0.0), &[0.0, 0.0]);
     }
 
-    /// One long column asks for at most half the pane, so it cannot starve
-    /// the columns beside it.
+    /// One long column asks for at most half the pane, so when space is
+    /// short it cannot starve the columns beside it: without the cap, 1000
+    /// into 400 would leave the first column 40.
     #[test]
     fn one_column_asks_for_at_most_half_the_pane() {
-        widths_are(column_widths(&[40.0, 900.0], 400.0), &[40.0, 200.0]);
+        widths_are(column_widths(&[100.0, 900.0], 400.0), &[100.0, 300.0]);
+    }
+
+    /// Width the other columns leave unused goes back to the columns the cap
+    /// cut, in proportion to what it cut, and never past their natural width;
+    /// a column the cap did not touch gets none of it.
+    #[test]
+    fn spare_width_goes_back_to_the_capped_columns() {
+        // A short key beside a long description: the description takes the
+        // rest of the pane.
+        widths_are(column_widths(&[40.0, 900.0], 400.0), &[40.0, 360.0]);
+        // One column wraps at the pane's width, not half of it.
+        widths_are(column_widths(&[900.0], 400.0), &[400.0]);
+        // A capped column that wants less than the spare stops at its natural
+        // width, and the table stays narrower than the pane.
+        widths_are(column_widths(&[40.0, 250.0], 400.0), &[40.0, 250.0]);
+        // At half the pane each, two cut columns already fill it, so with
+        // today's share the spare only ever goes to one column; sharing it
+        // by what each lost only matters if the share is ever made smaller.
+        widths_are(column_widths(&[300.0, 900.0], 400.0), &[200.0, 200.0]);
     }
 
     /// Run `paint` once with a frame's painter and the default palette.
