@@ -1,6 +1,6 @@
 //! What a fresh install ships on Windows
 //! (`plans/other-platforms/05-defaults-and-config.md` §2.2, §2.3, §6;
-//! `04-windows.md` W4.40, W4.41).
+//! `04-windows.md` W4.40, W4.41, W4.43).
 //!
 //! **Enter does what a double-click in Explorer does.** Every rule's first
 //! opener is the system's own "open" (`builtin:shell-open`), the program the
@@ -11,7 +11,10 @@
 //! for text, Paint for a picture, mpv and VLC for video and sound, 7-Zip's
 //! window for an archive (after the extract built-ins), Explorer, VS Code and
 //! a terminal for a folder. Every file's list ends in "Open with…", Windows'
-//! own chooser, the escape hatch for anything the table did not think of.
+//! own chooser, the escape hatch for anything the table did not think of. A
+//! font is the one kind whose Enter is not "open": it is the shell's
+//! `install` verb (`builtin:font-install`, W4.43), the Explorer menu's
+//! "Install", with the Font Viewer on `O`.
 //!
 //! Openers are argv lines here, not shell strings: df-app's Windows opener
 //! splits a command on whitespace, groups double quotes, and puts the paths
@@ -85,6 +88,13 @@ pub const CANDIDATES: &[(&str, &[&str], bool, &str)] = &[
         &[r#"wt -d "$dir""#, r#"cmd /K cd /d "$dir""#],
         false,
         "Terminal at file",
+    ),
+    ("install-font", &["builtin:font-install"], false, "Install"),
+    (
+        "font-viewer",
+        &["builtin:shell-open"],
+        false,
+        "Preview in Windows Font Viewer",
     ),
     (
         "bulk-rename",
@@ -182,6 +192,11 @@ fn is_program(path: &Path) -> bool {
 /// `text/plain`), then by type.
 pub const RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "bulk-rename.txt", &["bulk-rename"]),
+    (
+        "glob",
+        "*.{ttf,otf,ttc}",
+        &["install-font", "font-viewer", "open-with"],
+    ),
     ("glob", "*.{exe,msi}", &["run", "open-with"]),
     ("glob", "*.{bat,cmd,ps1}", &["run", "edit", "open-with"]),
     ("glob", "*.{stl,obj,ply,3mf}", &["open", "open-with"]),
@@ -392,8 +407,8 @@ mod tests {
     }
 
     /// The table the app holds: Enter is the system's own open on every
-    /// kind, "Open with…" ends every file's list, a folder offers
-    /// Explorer, and every name a rule gives that
+    /// kind but a font, "Open with…" ends every file's list, a font
+    /// installs, a folder offers Explorer, and every name a rule gives that
     /// the table has is an opener — the rest being programs this machine
     /// does not have, which the rule then skips.
     #[test]
@@ -427,6 +442,12 @@ mod tests {
                 Some("shell-open")
             );
         }
+        let font = names(c.openers_for("face.ttf", "font/ttf", false));
+        assert_eq!(font, ["install-font", "font-viewer", "open-with"]);
+        assert_eq!(
+            c.opener("install-font").and_then(Opener::builtin),
+            Some("font-install")
+        );
         let archive = names(c.openers_for("backup.zip", "application/zip", false));
         assert_eq!(
             &archive[1..4],

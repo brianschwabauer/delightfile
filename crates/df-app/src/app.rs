@@ -5101,6 +5101,54 @@ impl App {
         self.remote_ops.push(PendingRemote { id, slot });
     }
 
+    /// `builtin:font-install` over `paths`: each font through the platform's
+    /// install (Windows' `install` verb, W4.43) on a worker, since the
+    /// shell may ask whether to replace one already there and wait on the
+    /// answer, and a toast for each when it is done — "Installed Inter
+    /// Regular", or that the Font Viewer was opened instead where Windows
+    /// has no verb for it. The font is named as it names itself, its file
+    /// name where it will not say.
+    fn install_fonts(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            let name = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| crate::preview::doc::font::facts(&bytes).ok())
+                .map(|facts| {
+                    format!("{} {}", facts.family, facts.style)
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_else(|| file_name(&path));
+            let slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let job_slot = Arc::clone(&slot);
+            let job = FnJob::new(format!("Install {name}"), Lane::Micro, move |_ctx| {
+                let result = match open::install_font(&path) {
+                    Ok(open::FontInstall::Installed) => Ok(format!("Installed {name}")),
+                    Ok(open::FontInstall::Asked) => {
+                        Ok(format!("Windows was asked to install {name}"))
+                    }
+                    Ok(open::FontInstall::Previewed) => Ok(format!(
+                        "Opened {name} in the Font Viewer: this Windows has no Install for it"
+                    )),
+                    Err(e) => Err(format!("{name}: {e}")),
+                }
+                .map(|message| RemoteDone {
+                    message,
+                    ..RemoteDone::default()
+                });
+                match job_slot.lock() {
+                    Ok(mut guard) => *guard = Some(result),
+                    Err(poisoned) => *poisoned.into_inner() = Some(result),
+                }
+                Ok(())
+            });
+            let id = self.engine.spawn(job);
+            // A job whose result is a message, as the bin's emptying is.
+            self.remote_ops.push(PendingRemote { id, slot });
+        }
+    }
+
     /// The confirm was answered yes — or, for a local trash, was never put
     /// up at all (see [`App::trash`]).
     fn run_confirm(&mut self, confirm: Confirm, now: Instant) {
@@ -6109,6 +6157,19 @@ impl App {
                             return;
                         }
                     }
+                }
+                return;
+            }
+            // A font installed for this user, as Explorer's "Install" does
+            // (Windows' table names it for a font's Enter, W4.43).
+            if builtin == open::FONT_INSTALL_BUILTIN {
+                if open::INSTALLS_FONTS {
+                    self.install_fonts(paths);
+                } else {
+                    self.toasts.error(
+                        format!("`builtin:{builtin}` is not something delightfile can do"),
+                        now,
+                    );
                 }
                 return;
             }

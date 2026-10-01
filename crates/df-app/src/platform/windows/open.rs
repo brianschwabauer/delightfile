@@ -32,7 +32,13 @@
 //! so the calling thread has COM for the length of the call: the window's
 //! thread has it already (winit starts OLE there), and a pool thread — the
 //! connect prompt's — is given it and has it taken away again.
-#![allow(unsafe_code)] // COM's per-thread start and ShellExecuteW, on wide strings this function builds and keeps alive for the call
+//!
+//! **`builtin:font-install` is the shell's `install` verb** (W4.43), through
+//! `ShellExecuteExW`, the one that can be told to wait: Explorer's "Install"
+//! on a font, which installs it for this user. A Windows without the verb
+//! opens the font in the Font Viewer instead, and the window says which
+//! happened.
+#![allow(unsafe_code)] // COM's per-thread start, ShellExecuteW and ShellExecuteExW, on wide strings this module builds and keeps alive for the call
 
 use std::ffi::OsStr;
 use std::io;
@@ -185,6 +191,91 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
     Err(shell_error(code))
 }
 
+/// Whether `builtin:font-install` is something this platform does: yes, the
+/// shell's `install` verb (W4.43).
+pub const INSTALLS_FONTS: bool = true;
+
+/// How long a process the verb starts, when it starts one, is waited for.
+const INSTALL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The shell's `install` verb on `path` — what Explorer's "Install" on a
+/// font does, which installs it for this user (into
+/// `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, no administrator asked) — run
+/// and waited for. `Ok(false)` when the file's type has no `install` verb
+/// (`SE_ERR_NOASSOC`, `ERROR_NO_ASSOCIATION`): nothing was done.
+///
+/// Called on a task worker ([`crate::open::install_font`]): the verb may
+/// put up the shell's own "already installed — replace it?" and wait on it.
+pub fn install_verb(path: &Path) -> io::Result<bool> {
+    match shell_verb(path.as_os_str(), "install", INSTALL_WAIT) {
+        Ok(()) => Ok(true),
+        Err(VerbError::NoVerb) => Ok(false),
+        Err(VerbError::Io(error)) => Err(error),
+    }
+}
+
+/// Why a verb did not run.
+enum VerbError {
+    /// The file's type has no such verb.
+    NoVerb,
+    Io(io::Error),
+}
+
+/// `verb` on `target` through `ShellExecuteExW`, waited for: the call
+/// itself (`SEE_MASK_NOASYNC`, which a verb the shell runs in its own code
+/// needs for the work to be done when it returns), and a process the verb
+/// starts, up to `wait`. The shell's own error dialogs are off
+/// (`SEE_MASK_FLAG_NO_UI`): the window says what went wrong.
+fn shell_verb(target: &OsStr, verb: &str, wait: std::time::Duration) -> Result<(), VerbError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NO_ASSOCIATION};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
+        SHELLEXECUTEINFOW,
+    };
+    let wide = |text: &OsStr| -> Vec<u16> { text.encode_wide().chain(Some(0)).collect() };
+    let verb = wide(OsStr::new(verb));
+    let file = wide(target);
+    // SAFETY: as in `shell_open`: a per-thread start, balanced below.
+    let com = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
+    // SAFETY: all-zero is the structure's empty value: null strings and
+    // handles, no flags.
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    // SAFETY: `info` is sized and filled above; its strings are
+    // NUL-terminated and outlive the call.
+    let ok = unsafe { ShellExecuteExW(&mut info) } != 0;
+    // SAFETY: read at once on the failing thread.
+    let error = (!ok).then(|| unsafe { GetLastError() });
+    if ok && info.hProcess != 0 {
+        let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
+        // SAFETY: the process handle the call returned, waited on and then
+        // closed once.
+        unsafe {
+            WaitForSingleObject(info.hProcess, millis);
+            CloseHandle(info.hProcess);
+        }
+    }
+    if com >= 0 {
+        // SAFETY: balances the start counted above, on the same thread.
+        unsafe { CoUninitialize() };
+    }
+    match error {
+        None => Ok(()),
+        Some(code) if code == ERROR_NO_ASSOCIATION || info.hInstApp == 31 => Err(VerbError::NoVerb),
+        Some(code) => Err(VerbError::Io(io::Error::from_raw_os_error(code as i32))),
+    }
+}
+
 /// `ShellExecuteW`'s answer, in words a toast can carry.
 fn shell_error(code: isize) -> io::Error {
     match code {
@@ -309,6 +400,80 @@ mod tests {
 
         assert_eq!(run_typed("cmd /c exit 4", &[], &share).expect("ran"), 4);
         assert_eq!(letters(), before, "a letter pushd mapped is still mapped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the shell has for `verb` on files of `extension`, as
+    /// `AssocQueryStringW` reads it: `what` is a command line or a
+    /// `DelegateExecute` class.
+    fn association(extension: &str, verb: &str, what: i32) -> Option<String> {
+        use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE};
+        let wide =
+            |text: &str| -> Vec<u16> { OsStr::new(text).encode_wide().chain(Some(0)).collect() };
+        let (extension, verb) = (wide(extension), wide(verb));
+        let mut out = vec![0u16; 2048];
+        let mut len = out.len() as u32;
+        // SAFETY: both strings are NUL-terminated; `out` holds `len` units.
+        let result = unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                what,
+                extension.as_ptr(),
+                verb.as_ptr(),
+                out.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        (result >= 0).then(|| {
+            let end = out.iter().position(|&u| u == 0).unwrap_or(out.len());
+            String::from_utf16_lossy(&out[..end])
+        })
+    }
+
+    /// The shell has an `install` verb for a TrueType font — a command or a
+    /// handler class — which is what `builtin:font-install` runs (W4.43).
+    /// What it is, is printed, for the plan's record.
+    #[test]
+    fn the_shell_has_an_install_verb_for_fonts() {
+        use windows_sys::Win32::UI::Shell::{ASSOCSTR_COMMAND, ASSOCSTR_DELEGATEEXECUTE};
+        let command = association(".ttf", "install", ASSOCSTR_COMMAND);
+        let handler = association(".ttf", "install", ASSOCSTR_DELEGATEEXECUTE);
+        let open = association(".ttf", "open", ASSOCSTR_COMMAND);
+        eprintln!(".ttf install: command {command:?}, handler {handler:?}; open: {open:?}");
+        if std::env::var_os("CI").is_some() {
+            assert!(
+                command.is_some() || handler.is_some(),
+                "no install verb for .ttf on this Windows"
+            );
+        }
+    }
+
+    /// The verb installs a font for this user: a stock face no Windows has
+    /// (egui's Hack), under a name of this run's own, lands in the
+    /// per-user fonts folder. On a runner only (`CI`), whose profile is
+    /// thrown away after the job: a person's own machine keeps what a test
+    /// installs.
+    #[test]
+    fn a_font_installs_for_this_user() {
+        if std::env::var_os("CI").is_none() {
+            eprintln!("skipped: installs a font into this profile; runs on a runner only");
+            return;
+        }
+        let definitions = egui::FontDefinitions::default();
+        let mono = &definitions.families[&egui::FontFamily::Monospace][0];
+        let hack = &definitions.font_data[mono];
+        let dir = std::env::temp_dir().join(format!("df-font-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let font = dir.join(format!("delightfile-test-{}.ttf", std::process::id()));
+        std::fs::write(&font, &hack.font[..]).expect("the font");
+        let outcome = crate::open::install_font(&font).expect("the verb ran");
+        eprintln!("install_font: {outcome:?}");
+        assert_eq!(outcome, crate::open::FontInstall::Installed);
+        let local = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA");
+        let installed = PathBuf::from(local)
+            .join(r"Microsoft\Windows\Fonts")
+            .join(font.file_name().expect("a name"));
+        assert!(installed.is_file(), "{} is not there", installed.display());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

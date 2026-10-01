@@ -28,7 +28,7 @@
 
 use std::path::PathBuf;
 
-pub use crate::platform::open::{run_blocking, shell_open, spawn_detached};
+pub use crate::platform::open::{run_blocking, shell_open, spawn_detached, INSTALLS_FONTS};
 use crate::platform::open::{run_typed, spawn_typed};
 
 /// Whose line a command is, which decides how it is run where that differs:
@@ -69,6 +69,58 @@ pub fn run(
 
 /// The builtin that is the system's own "open" (`builtin:shell-open`).
 pub const SHELL_OPEN_BUILTIN: &str = "shell-open";
+
+/// The builtin that installs a font for this user (`builtin:font-install`):
+/// on Windows the shell's own `install` verb, what Explorer's "Install"
+/// does (`plans/other-platforms/04-windows.md` W4.43).
+pub const FONT_INSTALL_BUILTIN: &str = "font-install";
+
+/// What `builtin:font-install` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontInstall {
+    /// The verb ran and the font is in a fonts folder now.
+    Installed,
+    /// The verb ran and said yes, and the font is not in a fonts folder
+    /// yet: the shell's own "replace it?" may still be up.
+    Asked,
+    /// This Windows has no `install` verb for the file, so it was opened
+    /// in its default program, the Font Viewer, instead.
+    Previewed,
+}
+
+/// How long, after the verb said yes, the font is looked for in a fonts
+/// folder before the answer is "asked" rather than "installed".
+const INSTALL_SEEN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `builtin:font-install` on one font, on a task worker: the platform's
+/// `install` verb ([`crate::platform::open::install_verb`]); where the
+/// file's type has none, its default program, the Font Viewer, instead
+/// ([`FontInstall::Previewed`]). After the verb the font is looked for in
+/// the fonts folders ([`crate::platform::fonts::dirs`]) under its own file
+/// name: found is [`FontInstall::Installed`], not within
+/// [`INSTALL_SEEN`] is [`FontInstall::Asked`].
+pub fn install_font(path: &std::path::Path) -> std::io::Result<FontInstall> {
+    if !crate::platform::open::install_verb(path)? {
+        shell_open(path.as_os_str())?;
+        return Ok(FontInstall::Previewed);
+    }
+    let Some(name) = path.file_name() else {
+        return Ok(FontInstall::Asked);
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if crate::platform::fonts::dirs()
+            .iter()
+            .any(|dir| dir.join(name).is_file())
+        {
+            return Ok(FontInstall::Installed);
+        }
+        if start.elapsed() >= INSTALL_SEEN {
+            return Ok(FontInstall::Asked);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
 
 use df_core::config::{Config, Opener};
 use df_core::fs::Entry;

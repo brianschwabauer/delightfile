@@ -96,6 +96,17 @@ pub fn shell_open(_target: &std::ffi::OsStr) -> std::io::Result<()> {
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
+/// Whether `builtin:font-install` is something this platform does: not
+/// here, where no opener table names it (Windows' is the shell's `install`
+/// verb, W4.43).
+pub const INSTALLS_FONTS: bool = false;
+
+/// The shell's `install` verb, which Windows has and this platform has not:
+/// unsupported ([`INSTALLS_FONTS`]).
+pub fn install_verb(_path: &Path) -> std::io::Result<bool> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
