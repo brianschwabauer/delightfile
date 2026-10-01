@@ -1,24 +1,34 @@
 //! What a fresh install ships on Windows
-//! (`plans/other-platforms/05-defaults-and-config.md` §2.2, §2.3, §6).
+//! (`plans/other-platforms/05-defaults-and-config.md` §2.2, §2.3, §6;
+//! `04-windows.md` W4.40, W4.41).
+//!
+//! **Enter does what a double-click in Explorer does.** Every rule's first
+//! opener is the system's own "open" (`builtin:shell-open`), the program the
+//! file is associated with, so a photo opens in Photos, a page in the
+//! browser, a song in Media Player, and a file with no association in
+//! Windows' "How do you want to open this?". `O` is where the alternatives
+//! are, and only the ones this machine has: VS Code, Notepad++ and Notepad
+//! for text, Paint for a picture, mpv and VLC for video and sound, 7-Zip's
+//! window for an archive (after the extract built-ins), Explorer, VS Code and
+//! a terminal for a folder. Every file's list ends in "Open with…", Windows'
+//! own chooser, the escape hatch for anything the table did not think of.
 //!
 //! Openers are argv lines here, not shell strings: df-app's Windows opener
 //! splits a command on whitespace, groups double quotes, and puts the paths
-//! in for `$1`, `$@` and `$dir`, nothing else (W4.3). What a fresh machine
-//! has is the system's own "open" (`builtin:shell-open`), Notepad and `cmd`;
-//! VS Code, Windows Terminal, Zed and Chrome are used where they are
-//! installed.
+//! in for `$1`, `$@` and `$dir`, nothing else (W4.3).
 //!
-//! Some rows have two programs, the better one first — `code` then `notepad`
-//! to edit, `wt` then `cmd` for a terminal. [`openers`] picks, per row, the
-//! first whose program is on `PATH` when it is asked (when [`crate::config::
-//! Config::default`] builds the table, once a start), so the table the app
-//! holds has one command per row and the config format is unchanged (D5.4). A
-//! program installed while delightfile runs is seen at its next start.
-//!
-//! The rules are Linux's row for row, as on macOS: the system's default app
-//! (`open`) where Linux has delightviewer, and the openers Windows does not
-//! ship left out — delightviewer's editor, the wallpaper and AVIF helpers,
-//! and `edit-image`, which is `open` here.
+//! **A row is as many programs as can answer it, the best first** — `code`,
+//! `notepad++`, then `notepad` to edit; `wt` then `cmd` for a terminal.
+//! [`openers`] keeps, per row, the first whose program this machine has when
+//! it is asked (when [`crate::config::Config::default`] builds the table,
+//! once a start), and a row none of whose programs is here is not shipped at
+//! all, so no rule offers it and `O` never shows a choice that would only
+//! say "not found" (D5.4). A program is had when it is on `PATH` — under
+//! the names Windows runs it by, `.exe` and VS Code's `.cmd` — or registered
+//! in `App Paths`, where Notepad++, VLC and 7-Zip put themselves instead,
+//! and then the row runs it by the full path registered there
+//! ([`super::known::app_path`]). One installed while delightfile runs is
+//! seen at the next start.
 //!
 //! **The bookmarks are a Windows user's places** (W4.40): the profile folder
 //! as Home, the known folders where the shell says they are — a Documents
@@ -35,22 +45,35 @@ use crate::config::Bookmark;
 use super::known::{self, Known};
 
 /// Openers a rule can name: id, the commands to choose from (the first
-/// whose program is on `PATH`, else the last), blocking, description.
+/// whose program this machine has), blocking, description.
 pub const CANDIDATES: &[(&str, &[&str], bool, &str)] = &[
     ("open", &["builtin:shell-open"], false, "Open"),
+    ("run", &["builtin:shell-open"], false, "Run"),
+    (
+        "open-with",
+        &[r#"rundll32 shell32.dll,OpenAs_RunDLL "$1""#],
+        false,
+        "Open with…",
+    ),
+    ("vscode", &[r#"code "$@""#], false, "Open in VS Code"),
+    (
+        "notepad++",
+        &[r#"notepad++ "$@""#],
+        false,
+        "Open in Notepad++",
+    ),
+    ("notepad", &[r#"notepad "$1""#], false, "Open in Notepad"),
     (
         "edit",
-        &[r#"code --wait "$@""#, r#"notepad "$@""#],
+        &[r#"code "$@""#, r#"notepad++ "$@""#, r#"notepad "$1""#],
         false,
         "Edit",
     ),
-    ("zed", &[r#"zed "$@""#], false, "Open in Zed"),
-    (
-        "zed-workspace",
-        &[r#"zed "$1""#],
-        false,
-        "Open folder in Zed",
-    ),
+    ("paint", &[r#"mspaint "$1""#], false, "Edit in Paint"),
+    ("mpv", &[r#"mpv --force-window "$@""#], false, "Play in mpv"),
+    ("vlc", &[r#"vlc "$@""#], false, "Play in VLC"),
+    ("7-zip", &[r#"7zFM "$1""#], false, "Open in 7-Zip"),
+    ("explorer", &[r#"explorer "$1""#], false, "Open in Explorer"),
     (
         "terminal-here",
         &[r#"wt -d "$1""#, r#"cmd /K cd /d "$1""#],
@@ -63,13 +86,6 @@ pub const CANDIDATES: &[(&str, &[&str], bool, &str)] = &[
         false,
         "Terminal at file",
     ),
-    (
-        "open-in-chrome",
-        &[r#"chrome "$@""#],
-        false,
-        "Open in Chrome",
-    ),
-    ("play", &["builtin:shell-open"], false, "Play"),
     (
         "bulk-rename",
         &[r#"code --wait "$@""#, r#"notepad "$@""#],
@@ -92,27 +108,47 @@ pub const CANDIDATES: &[(&str, &[&str], bool, &str)] = &[
 ];
 
 /// The openers a fresh install ships, one command per row: each row's first
-/// candidate whose program is on `PATH` now, else its last.
-pub fn openers() -> Vec<(&'static str, &'static str, bool, &'static str)> {
+/// command whose program this machine has, and no row at all where it has
+/// none of them.
+pub fn openers() -> Vec<(&'static str, String, bool, &'static str)> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let found = |program: &str| on_path(&path, program);
+    let locate = |program: &str| -> Option<Located> {
+        if on_path(&path, program) {
+            return Some(Located::OnPath);
+        }
+        known::app_path(program).map(|at| Located::At(at.to_string_lossy().into_owned()))
+    };
     CANDIDATES
         .iter()
-        .map(|(id, commands, block, description)| {
-            (*id, pick(commands, &found), *block, *description)
+        .filter_map(|(id, commands, block, description)| {
+            Some((*id, pick(commands, &locate)?, *block, *description))
         })
         .collect()
 }
 
-/// The first of `commands` whose program `found` says is there, else the
-/// last. A builtin needs no program.
-fn pick(commands: &[&'static str], found: &dyn Fn(&str) -> bool) -> &'static str {
-    commands
-        .iter()
-        .find(|command| command.starts_with("builtin:") || program(command).is_some_and(found))
-        .or(commands.last())
-        .copied()
-        .unwrap_or_default()
+/// Where a program was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Located {
+    /// On `PATH`: the command runs it by name.
+    OnPath,
+    /// Registered in `App Paths` at this full path, which the command runs
+    /// it by, since starting a process reads `PATH` and not the registry.
+    At(String),
+}
+
+/// The first of `commands` whose program `locate` finds, as it should be
+/// run; `None` when it finds none of them. A builtin needs no program.
+fn pick(commands: &[&'static str], locate: &dyn Fn(&str) -> Option<Located>) -> Option<String> {
+    commands.iter().find_map(|command| {
+        if command.starts_with("builtin:") {
+            return Some((*command).to_string());
+        }
+        let program = program(command)?;
+        match locate(program)? {
+            Located::OnPath => Some((*command).to_string()),
+            Located::At(full) => Some(format!("\"{full}\"{}", &command[program.len()..])),
+        }
+    })
 }
 
 /// The program a command runs: its first word.
@@ -129,48 +165,74 @@ fn on_path(path: &std::ffi::OsStr, program: &str) -> bool {
     std::env::split_paths(path).any(|dir| names.iter().any(|name| is_program(&dir.join(name))))
 }
 
+/// A program file — or an app execution alias, the empty stand-in under
+/// `WindowsApps` a Store app (the new Paint, Windows Terminal) is run by,
+/// which cannot be opened as a file and is not a link to one.
 fn is_program(path: &Path) -> bool {
     crate::platform::process::is_executable(path)
+        || (std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")))
 }
 
-/// Opener rules, matched top-down: Linux's
-/// ([`crate::config::DEFAULT_RULES`]) row for row, with `open` — the
-/// system's default app — where Linux has delightviewer, and the openers
-/// Windows does not ship (delightviewer's editor, the wallpaper and AVIF
-/// helpers, `edit-image`) left out. An `open` a row would then name twice is
-/// named once.
+/// Opener rules, matched top-down. Every file's first opener is the
+/// system's own, then the alternatives this machine has, then "Open with…";
+/// by name first, for the reason Linux's table gives (a `.obj` is
+/// `text/plain`), then by type.
 pub const RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "bulk-rename.txt", &["bulk-rename"]),
-    ("glob", "*.{stl,obj,ply,3mf}", &["open", "terminal-at"]),
-    ("glob", "*.{gcode,gco}", &["open", "edit", "terminal-at"]),
-    ("glob", "*.{ttf,otf,ttc}", &["open", "terminal-at"]),
+    ("glob", "*.{exe,msi}", &["run", "open-with"]),
+    ("glob", "*.{bat,cmd,ps1}", &["run", "edit", "open-with"]),
+    ("glob", "*.{stl,obj,ply,3mf}", &["open", "open-with"]),
+    (
+        "glob",
+        "*.{gcode,gco}",
+        &["open", "vscode", "notepad++", "notepad", "open-with"],
+    ),
     (
         "glob",
         "*.{zip,tar,tgz,gz,bz2,xz,zst,7z,rar,cbz,cbr}",
-        &["extract", "extract-here", "extract-merged", "open"],
+        &[
+            "open",
+            "extract",
+            "extract-here",
+            "extract-merged",
+            "7-zip",
+            "open-with",
+        ],
     ),
     (
         "mime",
         "application/{zip,x-tar,gzip,x-bzip2,x-xz,zstd,x-7z-compressed,vnd.rar}",
-        &["extract", "extract-here", "extract-merged", "open"],
+        &[
+            "open",
+            "extract",
+            "extract-here",
+            "extract-merged",
+            "7-zip",
+            "open-with",
+        ],
     ),
+    // Paint cannot read a vector; VS Code can, as the text it is.
+    ("mime", "image/svg+xml", &["open", "vscode", "open-with"]),
+    ("mime", "image/*", &["open", "paint", "open-with"]),
+    ("mime", "video/*", &["open", "mpv", "vlc", "open-with"]),
+    ("mime", "audio/*", &["open", "mpv", "vlc", "open-with"]),
+    ("mime", "application/pdf", &["open", "open-with"]),
     (
         "mime",
-        "text/html",
-        &["zed", "open-in-chrome", "edit", "open", "terminal-at"],
+        "text/*",
+        &["open", "vscode", "notepad++", "notepad", "open-with"],
     ),
-    ("mime", "text/*", &["zed", "edit", "open", "terminal-at"]),
     (
         "mime",
         "application/{json,ndjson,xml,javascript,x-shellscript,x-yaml,toml}",
-        &["zed", "edit", "open", "terminal-at"],
+        &["open", "vscode", "notepad++", "notepad", "open-with"],
     ),
-    ("mime", "image/*", &["open", "terminal-at"]),
-    ("mime", "video/*", &["open", "play", "terminal-at"]),
-    ("mime", "audio/*", &["open", "terminal-at"]),
-    ("mime", "application/pdf", &["open", "terminal-at"]),
-    ("glob", "*/", &["open", "zed-workspace", "terminal-here"]),
-    ("glob", "*", &["open", "terminal-at"]),
+    ("glob", "*/", &["explorer", "vscode", "terminal-here"]),
+    // The fallback, so `O` is never empty.
+    ("glob", "*", &["open", "open-with"]),
 ];
 
 /// The `g` chord's bookmarks, in which-key order: Home, the six known
@@ -298,57 +360,139 @@ mod tests {
         );
     }
 
-    /// A row takes its first program that is there, else its last; a
-    /// builtin is always there.
+    /// A row takes its first program this machine has — by name when it is
+    /// on `PATH`, by its full path when `App Paths` has it — and a row with
+    /// none of its programs here is no row; a builtin is always here.
     #[test]
     fn a_row_takes_the_first_program_that_is_there() {
-        let edit: &[&'static str] = &[r#"code --wait "$@""#, r#"notepad "$@""#];
-        assert_eq!(pick(edit, &|p| p == "code"), r#"code --wait "$@""#);
-        assert_eq!(pick(edit, &|p| p == "notepad"), r#"notepad "$@""#);
-        assert_eq!(pick(edit, &|_| false), r#"notepad "$@""#, "else the last");
+        let edit: &[&'static str] = &[r#"code "$@""#, r#"notepad++ "$@""#, r#"notepad "$1""#];
+        let only = |name: &'static str| move |p: &str| (p == name).then_some(Located::OnPath);
+        assert_eq!(pick(edit, &only("code")).as_deref(), Some(r#"code "$@""#));
         assert_eq!(
-            pick(&["builtin:shell-open"], &|_| false),
-            "builtin:shell-open"
+            pick(edit, &only("notepad")).as_deref(),
+            Some(r#"notepad "$1""#)
+        );
+        assert_eq!(pick(edit, &|_| None), None, "nothing here, no row");
+        let registered = |p: &str| {
+            (p == "notepad++")
+                .then(|| Located::At(r"C:\Program Files\Notepad++\notepad++.exe".into()))
+        };
+        assert_eq!(
+            pick(edit, &registered).as_deref(),
+            Some(r#""C:\Program Files\Notepad++\notepad++.exe" "$@""#)
+        );
+        assert_eq!(
+            pick(&["builtin:shell-open"], &|_| None).as_deref(),
+            Some("builtin:shell-open")
         );
     }
 
-    /// The table the app holds: one command per row, the terminal and the
-    /// editor whichever this machine has — the runner has `cmd` and Notepad
-    /// whatever else it has — and every name a rule gives is an opener.
+    fn names(openers: Vec<&Opener>) -> Vec<&str> {
+        openers.into_iter().map(|o| o.name.as_str()).collect()
+    }
+
+    /// The table the app holds: Enter is the system's own open on every
+    /// kind, "Open with…" ends every file's list, a folder offers
+    /// Explorer, and every name a rule gives that
+    /// the table has is an opener — the rest being programs this machine
+    /// does not have, which the rule then skips.
+    #[test]
+    fn enter_is_what_a_double_click_does() {
+        let c = Config::default();
+        for (name, mime) in [
+            ("cat.png", "image/png"),
+            ("logo.svg", "image/svg+xml"),
+            ("clip.mp4", "video/mp4"),
+            ("song.mp3", "audio/mpeg"),
+            ("paper.pdf", "application/pdf"),
+            ("notes.txt", "text/plain"),
+            ("index.html", "text/html"),
+            ("data.json", "application/json"),
+            ("backup.zip", "application/zip"),
+            ("part.stl", "model/stl"),
+            ("mystery", "application/octet-stream"),
+        ] {
+            let list = names(c.openers_for(name, mime, false));
+            assert_eq!(list.first(), Some(&"open"), "{name}: {list:?}");
+            assert_eq!(list.last(), Some(&"open-with"), "{name}: {list:?}");
+        }
+        for (name, mime) in [
+            ("setup.exe", "application/x-msdownload"),
+            ("go.ps1", "text/plain"),
+        ] {
+            let list = names(c.openers_for(name, mime, false));
+            assert_eq!(list.first(), Some(&"run"), "{name}: {list:?}");
+            assert_eq!(
+                c.opener("run").and_then(Opener::builtin),
+                Some("shell-open")
+            );
+        }
+        let archive = names(c.openers_for("backup.zip", "application/zip", false));
+        assert_eq!(
+            &archive[1..4],
+            ["extract", "extract-here", "extract-merged"]
+        );
+        let folder = names(c.openers_for("Work", "inode/directory", true));
+        assert_eq!(folder.first(), Some(&"explorer"), "{folder:?}");
+        assert_eq!(folder.last(), Some(&"terminal-here"), "{folder:?}");
+        for gone in [
+            "zed",
+            "zed-workspace",
+            "open-in-chrome",
+            "edit-image",
+            "play",
+        ] {
+            assert!(c.opener(gone).is_none(), "{gone} is not Windows'");
+        }
+        // The programs every Windows has are always rows.
+        for there in [
+            "open-with",
+            "edit",
+            "explorer",
+            "terminal-here",
+            "bulk-rename",
+        ] {
+            assert!(c.opener(there).is_some(), "{there}");
+        }
+        assert!(c.opener("bulk-rename").is_some_and(|o| o.block));
+        assert!(!c.opener("edit").is_some_and(|o| o.block));
+        for (_, _, openers) in RULES {
+            for name in *openers {
+                assert!(
+                    CANDIDATES.iter().any(|(id, ..)| id == name),
+                    "a rule names {name}, which no row is"
+                );
+            }
+        }
+    }
+
+    /// The runner's machine: `cmd` and `rundll32` are on `PATH`, so the
+    /// terminal and "Open with…" are there; `edit` is VS Code, Notepad++ or
+    /// Notepad, whichever this machine has first.
     #[test]
     fn the_shipped_openers_are_what_this_machine_has() {
         let c = Config::default();
         let command = |id: &str| c.opener(id).map(|o| o.command.clone()).unwrap_or_default();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        assert!(on_path(&path, "cmd"));
+        assert!(on_path(&path, "rundll32"));
         assert!(
             ["wt -d \"$1\"", "cmd /K cd /d \"$1\""].contains(&command("terminal-here").as_str()),
             "{}",
             command("terminal-here")
         );
+        let edit = command("edit");
         assert!(
-            ["code --wait \"$@\"", "notepad \"$@\""].contains(&command("edit").as_str()),
-            "{}",
-            command("edit")
+            edit.starts_with("code ") || edit.contains("notepad"),
+            "{edit}"
         );
         assert_eq!(command("open"), "builtin:shell-open");
-        assert!(c.opener("bulk-rename").is_some_and(|o| o.block));
-        assert!(on_path(
-            &std::env::var_os("PATH").unwrap_or_default(),
-            "cmd"
-        ));
-        for rule in &c.rules {
-            for name in &rule.openers {
-                assert!(c.opener(name).is_some(), "{rule:?} names a missing {name}");
-            }
-        }
-        let names =
-            |v: Vec<&Opener>| -> Vec<String> { v.into_iter().map(|o| o.name.clone()).collect() };
-        assert_eq!(
-            names(c.openers_for("cat.png", "image/png", false))[0],
-            "open"
-        );
-        assert_eq!(
-            names(c.openers_for("notes.md", "text/markdown", false)),
-            ["zed", "edit", "open", "terminal-at"]
+        eprintln!(
+            "this machine's alternatives: {:?}",
+            c.openers
+                .iter()
+                .map(|o| (&o.name, &o.command))
+                .collect::<Vec<_>>()
         );
     }
 }

@@ -1025,7 +1025,7 @@ impl Default for Config {
                 .into_iter()
                 .map(|(name, command, block, description)| Opener {
                     name: name.to_string(),
-                    command: command.to_string(),
+                    command,
                     block,
                     description: description.to_string(),
                 })
@@ -2599,8 +2599,11 @@ mod tests {
         assert!(!c.openers_for("cat.png", "image/png", false).is_empty());
     }
 
-    /// Every platform's table opens a text file in Zed first (05 D5.3).
+    /// Linux's and macOS's tables open a text file in Zed first (05 D5.3);
+    /// Windows' opens every file in its default app first, as a double-click
+    /// in Explorer does (W4.41, tested beside it in `platform::defaults`).
     #[test]
+    #[cfg(unix)]
     fn a_text_file_opens_in_zed_first_everywhere() {
         let c = Config::default();
         let first = c

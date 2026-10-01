@@ -91,8 +91,13 @@ pub const OPENERS: &[(&str, &str, bool, &str)] = &[
 
 /// The openers a fresh install ships, one command per row: [`OPENERS`] as
 /// it stands, each carrying its own fallback in its shell string.
-pub fn openers() -> Vec<(&'static str, &'static str, bool, &'static str)> {
-    OPENERS.to_vec()
+pub fn openers() -> Vec<(&'static str, String, bool, &'static str)> {
+    OPENERS
+        .iter()
+        .map(|(id, command, block, description)| {
+            (*id, (*command).to_string(), *block, *description)
+        })
+        .collect()
 }
 
 /// Opener rules, matched top-down: Linux's

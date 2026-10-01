@@ -598,40 +598,44 @@ mod tests {
         assert_eq!(archive.builtin(), Some("extract"));
     }
 
-    /// The rules Windows ships (05-defaults-and-config.md §2.2, §2.3, D5.4):
-    /// what Linux hands to delightviewer opens in the system's default app
-    /// (`builtin:shell-open`), text still opens in Zed, and `edit` is VS Code
+    /// The rules Windows ships (05-defaults-and-config.md §2.2, §2.3, W4.41):
+    /// Enter is what a double-click in Explorer does — the system's default
+    /// app (`builtin:shell-open`) for every kind, text and archives
+    /// included — `O` ends in "Open with…", and `edit` is VS Code, Notepad++
     /// or Notepad, whichever this machine has, never a wait.
     #[test]
     #[cfg(windows)]
     fn opener_rules_pick_by_glob_then_mime_on_windows() {
         let config = Config::default();
-        let first = |name: &str, mime: &str| -> Option<&Opener> {
-            config.openers_for(name, mime, false).into_iter().next()
-        };
+        let all =
+            |name: &str, mime: &str| -> Vec<&Opener> { config.openers_for(name, mime, false) };
         for (name, mime) in [
             ("cat.png", "image/png"),
             ("paper.pdf", "application/pdf"),
+            ("notes.txt", "text/plain"),
+            ("backup.tar.gz", "application/gzip"),
             ("mystery", "application/octet-stream"),
         ] {
-            let open = first(name, mime).expect(name);
+            let list = all(name, mime);
+            let open = list.first().expect(name);
             assert_eq!(open.name, "open", "{name}");
             assert_eq!(open.builtin(), Some("shell-open"), "{name}");
+            assert_eq!(
+                list.last().map(|o| o.name.as_str()),
+                Some("open-with"),
+                "{name}"
+            );
         }
-        assert_eq!(
-            first("notes.txt", "text/plain").map(|o| o.name.as_str()),
-            Some("zed")
-        );
         let edit = config.opener("edit").expect("edit");
         assert!(!edit.block, "edit must not block: {}", edit.command);
         assert!(
-            edit.command.starts_with("code ") || edit.command.starts_with("notepad "),
+            edit.command.starts_with("code ") || edit.command.contains("notepad"),
             "{}",
             edit.command
         );
         assert!(config.opener("reveal").is_none());
-        let archive = first("backup.tar.gz", "application/gzip").expect("archive");
-        assert_eq!(archive.builtin(), Some("extract"));
+        let archive = all("backup.tar.gz", "application/gzip");
+        assert_eq!(archive[1].builtin(), Some("extract"));
     }
 
     fn file(name: &str) -> Entry {
