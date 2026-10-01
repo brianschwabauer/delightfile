@@ -861,6 +861,31 @@ mod tests {
         }
     }
 
+    /// A zip goes where its name says when the name is a package this program
+    /// previews: a Word file to the Office reader, a 3MF to the turntable.
+    /// Every other zip — a Visio drawing included, whose first member is a
+    /// Word file's — lists.
+    #[test]
+    fn a_zip_named_as_a_package_goes_to_that_packages_previewer() {
+        let mut zip = b"PK\x03\x04".to_vec();
+        zip.resize(26, 0);
+        zip.extend_from_slice(&19u16.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+        zip.extend_from_slice(b"[Content_Types].xml<Types/>");
+        for (name, want) in [
+            ("report.docx", PreviewKind::Office),
+            ("part.3mf", PreviewKind::Model3d),
+            ("drawing.vsdx", PreviewKind::Archive),
+            ("bundle.zip", PreviewKind::Archive),
+        ] {
+            let path = write(name, &zip);
+            match build_one(&path) {
+                Preview::NeedsDecode { kind, .. } => assert_eq!(kind, want, "{name}"),
+                other => panic!("{name}: expected a decode request, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn bytes_beat_the_extension_here_too() {
         // A JPEG named `.txt` must not reach the text previewer.

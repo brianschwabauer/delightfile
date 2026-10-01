@@ -248,36 +248,21 @@ fn sniff_ogg(head: &[u8]) -> Option<&'static str> {
     Some("audio/ogg")
 }
 
-/// What a zip is called once its first member says it is an Office Open XML
-/// package and nothing yet says which of the three: not a registered type, but
-/// the prefix [`super::kind`] maps to [`super::PreviewKind::Office`], which is
-/// all the preview needs. Which of Word, PowerPoint and Excel it is, df-app
-/// finds from the parts inside.
-pub const OOXML_MIME: &str = "application/vnd.openxmlformats-officedocument";
-
-/// The three types a name can give an Office Open XML package, which are kept
-/// over [`OOXML_MIME`] when the bytes agree (see [`sniff_or_hint`]).
-const OOXML_HINTS: &[&str] = &[
+/// The formats that are a zip on disk and previewed as what they are rather
+/// than as a listing of their members, by the type their name gives them:
+/// Word, PowerPoint and Excel's XML formats, read as text, and 3MF, turned on
+/// the turntable. See [`sniff_or_hint`] for why the name is what decides.
+const ZIP_PACKAGES: &[&str] = &[
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "model/3mf",
 ];
 
-/// The part every Office Open XML package carries, naming the content type of
-/// each of its other parts.
-const CONTENT_TYPES: &[u8] = b"[Content_Types].xml";
-
-/// Zip, and the formats that are a zip with a telling first member.
-///
-/// epub is worth separating because it goes to its opener rather than its
-/// listing. An Office Open XML package — a `.docx`, `.pptx` or `.xlsx` — is
-/// worth separating because it previews as the text it carries rather than as
-/// a list of XML files. Word, PowerPoint and Excel write its
-/// `[Content_Types].xml` first, and the first local header's name sits at a
-/// fixed offset (30, after a length at 26), so the first 8 KiB settle it with
-/// no index read. A package whose writer put that part somewhere else —
-/// LibreOffice writes it last — has nothing in its head to tell it from any
-/// other zip, and sniffs as one.
+/// Zip, and the one format that is a zip with a fixed first member. epub is
+/// worth separating because it goes to its opener rather than its listing.
+/// The packages in [`ZIP_PACKAGES`] have no fixed first member to separate
+/// them by, and are told apart by their names instead.
 fn sniff_zip(head: &[u8]) -> Option<&'static str> {
     if !head.starts_with(b"PK\x03\x04")
         && !head.starts_with(b"PK\x05\x06")
@@ -288,17 +273,7 @@ fn sniff_zip(head: &[u8]) -> Option<&'static str> {
     if starts_with(head, 30, b"mimetypeapplication/epub+zip") {
         return Some("application/epub+zip");
     }
-    if head.starts_with(b"PK\x03\x04") && first_member(head) == Some(CONTENT_TYPES) {
-        return Some(OOXML_MIME);
-    }
     Some("application/zip")
-}
-
-/// The name in the local header at the very front of a zip, when the head
-/// holds all of it.
-fn first_member(head: &[u8]) -> Option<&[u8]> {
-    let len = u16::from_le_bytes([*head.get(26)?, *head.get(27)?]) as usize;
-    head.get(30..30 + len)
 }
 
 fn starts_with(head: &[u8], offset: usize, needle: &[u8]) -> bool {
@@ -367,9 +342,14 @@ pub fn looks_like_text(head: &[u8]) -> bool {
 ///
 /// 1. **A signature wins.** Bytes do not lie about what they are, and a
 ///    `.txt` holding a JPEG is a JPEG. The one signature that knows less than
-///    the name is an Office Open XML package's ([`OOXML_MIME`]): the bytes say
-///    "Word, PowerPoint or Excel" and a `.docx` says which, so a name that
-///    gives one of the three keeps it.
+///    the name is zip's. A `.docx`, a `.pptx`, an `.xlsx` and a `.3mf` are
+///    zips whose members are in whatever order their writer chose — Word puts
+///    `[Content_Types].xml` first, LibreOffice puts it last, a slicer may do
+///    either, and a Visio drawing starts the same way as a Word file — so the
+///    head cannot say which of them a file is, or that it is one at all. The
+///    name can, and for those four ([`ZIP_PACKAGES`]) it is believed; the
+///    reader each one goes to opens the package and says so when the name
+///    lied. Every other zip is a zip.
 /// 2. **Otherwise, if it reads as text**, keep the hint when the hint is
 ///    itself textual — that is how `main.rs` stays `text/rust` and gets syntax
 ///    highlighting instead of collapsing to `text/plain`. `.obj`, `.ply` and
@@ -380,7 +360,7 @@ pub fn looks_like_text(head: &[u8]) -> bool {
 ///    the opener rules match on them.
 pub fn sniff_or_hint(head: &[u8], hint: &'static str) -> &'static str {
     if let Some(mime) = sniff(head) {
-        if mime == OOXML_MIME && OOXML_HINTS.contains(&hint) {
+        if mime == "application/zip" && ZIP_PACKAGES.contains(&hint) {
             return hint;
         }
         return mime;
@@ -572,36 +552,48 @@ mod tests {
         zip
     }
 
-    #[test]
-    fn an_office_package_is_a_zip_led_by_its_content_types() {
-        let docx = zip_led_by(b"[Content_Types].xml");
-        assert_eq!(sniff(&docx), Some(OOXML_MIME));
-
-        // Any other first member is a zip like any other — including the
-        // `_rels/.rels` a LibreOffice package starts with.
-        assert_eq!(sniff(&zip_led_by(b"_rels/.rels")), Some("application/zip"));
-        assert_eq!(
-            sniff(&zip_led_by(b"[Content_Types].xml.bak")),
-            Some("application/zip")
-        );
-        // A head cut inside the name says nothing about it.
-        assert_eq!(sniff(&docx[..40]), Some("application/zip"));
+    /// What a file called `name` holding `head` is, with the hint the scanner
+    /// would have given it.
+    fn typed(head: &[u8], name: &str) -> &'static str {
+        sniff_or_hint(head, crate::fs::mime::hint_for_name(name))
     }
 
     #[test]
-    fn an_office_package_keeps_the_name_that_says_which() {
-        let docx = zip_led_by(b"[Content_Types].xml");
-        for hint in OOXML_HINTS {
-            assert_eq!(sniff_or_hint(&docx, hint), *hint);
-        }
-        // A name that says nothing, or something else, gets the family.
-        assert_eq!(sniff_or_hint(&docx, UNKNOWN_MIME), OOXML_MIME);
-        assert_eq!(sniff_or_hint(&docx, "application/zip"), OOXML_MIME);
-        // And a `.docx` that is a plain zip inside is a plain zip.
+    fn a_zip_named_as_a_package_this_previews_is_that_package() {
+        // Word's order and a slicer's: `[Content_Types].xml` first.
+        let word_order = zip_led_by(b"[Content_Types].xml");
+        // LibreOffice's: the relationships first, the content types last.
+        let libreoffice_order = zip_led_by(b"_rels/.rels");
+
+        assert_eq!(typed(&word_order, "part.3mf"), "model/3mf");
         assert_eq!(
-            sniff_or_hint(&zip_led_by(b"notes.txt"), OOXML_HINTS[0]),
-            "application/zip"
+            typed(&libreoffice_order, "report.docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         );
+        assert_eq!(
+            typed(&word_order, "deck.pptx"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
+        assert_eq!(
+            typed(&libreoffice_order, "budget.xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+    }
+
+    #[test]
+    fn any_other_zip_is_a_zip_whatever_its_first_member() {
+        let word_order = zip_led_by(b"[Content_Types].xml");
+        let libreoffice_order = zip_led_by(b"_rels/.rels");
+        // A Visio drawing starts exactly as a Word file does, and lists.
+        assert_eq!(typed(&word_order, "drawing.vsdx"), "application/zip");
+        assert_eq!(typed(&libreoffice_order, "report.zip"), "application/zip");
+        assert_eq!(typed(&word_order, "no-extension"), "application/zip");
+        assert_eq!(sniff(&word_order), Some("application/zip"));
+        // A name only wins over a zip: a `.docx` that is really a PNG is a
+        // PNG.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(64, 0);
+        assert_eq!(typed(&png, "report.docx"), "image/png");
     }
 
     #[test]

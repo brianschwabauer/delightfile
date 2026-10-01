@@ -229,9 +229,7 @@ pub fn detect(path: &Path) -> Result<ArchiveFormat, ArchiveError> {
 /// The format decision, split out so it is a table test.
 pub fn format_for(head: &[u8], path: &Path) -> Result<ArchiveFormat, ArchiveError> {
     match sniff::sniff(head) {
-        Some("application/zip") | Some("application/epub+zip") | Some(sniff::OOXML_MIME) => {
-            return Ok(ArchiveFormat::Zip)
-        }
+        Some("application/zip") | Some("application/epub+zip") => return Ok(ArchiveFormat::Zip),
         Some("application/x-tar") => return Ok(ArchiveFormat::Tar),
         Some("application/gzip") => return Ok(ArchiveFormat::TarGz),
         Some("application/x-xz") => return Ok(ArchiveFormat::TarXz),

@@ -21,11 +21,12 @@
 //!
 //! By the part that is there, not by the name or the type df-core sniffed:
 //! `word/document.xml` is a Word document, `ppt/presentation.xml` a
-//! presentation, `xl/workbook.xml` a workbook. The sniff only knew it was an
-//! Office package (`df_core::preview::sniff::OOXML_MIME`), and a template, a
-//! macro-enabled workbook or a misnamed file is told apart the same way.
-//! Anything else is said to be not one of the three, in the one line the pane
-//! shows for a file it could not read.
+//! presentation, `xl/workbook.xml` a workbook. df-core sent the file here on
+//! its name alone — the bytes of all three say only "zip" — so the name is a
+//! claim this checks rather than a fact it relies on: a `.pptx` that is a
+//! Word file reads as the Word file it is, and a plain zip renamed `.docx` is
+//! said to be not one of the three, in the one line the pane shows for a file
+//! it could not read.
 //!
 //! ## A scanner, not a parser
 //!

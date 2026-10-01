@@ -168,11 +168,11 @@ const FAMILIES: &[(&str, PreviewKind)] = &[
     ("audio/", PreviewKind::Audio),
     ("font/", PreviewKind::Font),
     ("model/", PreviewKind::Model3d),
-    // Word, PowerPoint and Excel's XML formats, by prefix: a template or a
-    // slideshow is the same package as the document, and the sniffer's own
-    // answer for a package that says no more than that it is one
-    // (`super::sniff::OOXML_MIME`) is the prefix itself. Before the general
-    // `openxmlformats-` entry below, which it would otherwise be shadowed by.
+    // Word, PowerPoint and Excel's XML formats, by prefix, so a template or a
+    // slideshow — the same package as the document — needs no entry of its
+    // own. These only arrive by name: the bytes of every one of them say zip,
+    // and `super::sniff` keeps the name's type over that. Before the general
+    // `openxmlformats-` entry below, which would otherwise shadow it.
     (
         "application/vnd.openxmlformats-officedocument",
         PreviewKind::Office,
@@ -295,12 +295,6 @@ mod tests {
             (
                 "budget.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                PreviewKind::Office,
-            ),
-            // What the sniffer says of a package whose name says nothing.
-            (
-                "report",
-                "application/vnd.openxmlformats-officedocument",
                 PreviewKind::Office,
             ),
             ("src.tar.gz", "application/gzip", PreviewKind::Archive),

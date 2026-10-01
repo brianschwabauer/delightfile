@@ -1826,9 +1826,9 @@ fn not_a_zip_is_an_error_not_an_absent_member() {
     assert!(matches!(err, ArchiveError::Malformed { .. }), "{err:?}");
 }
 
-/// An Office package — `[Content_Types].xml` first, which the sniffer reports
-/// as its own type — is still a zip to the archive reader: browsing into a
-/// `.docx` lists its XML.
+/// An Office package previews as its text, by its name, but it is still a zip
+/// to the archive reader, which goes by bytes alone: browsing into a `.docx`
+/// lists its XML.
 #[test]
 fn an_office_package_is_detected_as_the_zip_it_is() {
     let bytes = build_zip(
@@ -1837,10 +1837,6 @@ fn an_office_package_is_detected_as_the_zip_it_is() {
             ZipMember::file("word/document.xml", b"<w:document/>"),
         ],
         b"",
-    );
-    assert_eq!(
-        crate::preview::sniff(&bytes),
-        Some(crate::preview::sniff::OOXML_MIME)
     );
     assert_eq!(
         format_for(&bytes, Path::new("report.docx")).unwrap(),
