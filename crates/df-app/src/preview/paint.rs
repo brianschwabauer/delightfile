@@ -764,16 +764,30 @@ const COLUMN_FLOOR: f32 = BODY * 4.0;
 /// table of one column, still uses the whole pane.
 const COLUMN_SHARE: f32 = 0.5;
 
-/// How many body rows the column widths are measured from.
+/// How many body rows the column widths are measured from by laying them out.
 ///
-/// A width is the widest cell in its column, and finding it means laying out
-/// every cell on one line. Two hundred rows is more than any table written by
-/// hand. Past them, a spreadsheet of five hundred rows by eight columns would
-/// be another two thousand four hundred one-line layouts for egui to make and
-/// then look up every frame, to learn widths the first two hundred rows have
-/// almost always settled — and a wider cell further down is not lost, it wraps
-/// inside the column it is given.
+/// A width is the widest cell in its column, and the exact way to find it is
+/// to lay every cell out on one line. Two hundred rows is more than any table
+/// written by hand. Past them, a spreadsheet of five hundred rows by eight
+/// columns would be another two thousand four hundred layouts for egui to
+/// make and then look up every frame, so the rows after these are measured by
+/// adding up their glyphs' advances instead (see [`PAIR_ALLOWANCE`]) — which
+/// is what keeps an ID column that reaches four digits at row 1000 from
+/// wrapping in a column sized for three.
 const MEASURE_ROWS: usize = 200;
+
+/// How many cells past [`MEASURE_ROWS`] the column widths, and the one-line
+/// test for rows the pane does not show, are worked out from summed advances.
+///
+/// Summing is a lookup per character against a table of advances filled as
+/// the frame meets them, cheap enough to run over a whole sheet every frame —
+/// up to a point: a table of fifty thousand cells measured at about four
+/// milliseconds a frame in the development build, sizing and rows together.
+/// That is a sheet of thirty columns by more than sixteen hundred rows, past
+/// where a preview is the way anyone reads a spreadsheet. Beyond it a wider
+/// cell wraps in the column it is given, and a row is summed only when it is
+/// near enough the pane to be asked about.
+const ESTIMATE_CELLS: usize = 50_000;
 
 /// Extra wrap width a cell is laid out with. egui rounds a measured width to a
 /// thirty-second of a point, which can land a hair under the text's real width,
@@ -872,6 +886,120 @@ fn fit_columns(natural: &[f32], available: f32) -> Vec<f32> {
     }
 }
 
+/// What each pair of neighbouring characters in the body face may add to a
+/// cell's summed advances: 0.08 em.
+///
+/// Laying a cell out only to learn how wide it is on one line is most of what
+/// a long spreadsheet costs a frame, so past the rows the sizing pass lays out
+/// a cell's width is the sum of what egui says each of its characters advances
+/// ([`glyph_advance`]), and a row the pane does not show is one line tall when
+/// every cell's sum fits the width its column wraps at. One em a character
+/// would have needed no fonts at all, and was rejected twice over: it is not a
+/// bound for these faces, where `ᾪ` and `Ǆ` advance 1.27 em, and it does not
+/// help where help is needed, since digits are 0.56 em and a column sized to
+/// its own numbers would fail it on nearly every row. Real advances are not
+/// quite the whole story either, because egui shapes text and a kerning pair
+/// can push a run wider: in the body face `[]` lays out 0.08 em wider than its
+/// two advances, the most of any pair of printable ASCII characters, so every
+/// neighbouring pair is allowed that much, and pairs outside ASCII are taken
+/// to kern no more. Two digits are not — no pair of them kerns in the body
+/// face — and no pair of printable ASCII kerns wider in the monospace face of
+/// inline code, so numbers and code are summed exactly. A test pins all three
+/// facts, so a change of font fails there rather than in a row's height.
+const PAIR_ALLOWANCE: f32 = 0.08 * BODY;
+
+/// Whether a cell has a character in it that a sum of advances cannot speak
+/// for: a line break starts a second line whatever the width, and a tab's
+/// advance is a tab stop, not a glyph's.
+fn breaks_line(cell: &[markdown::Span]) -> bool {
+    cell.iter().any(|span| span.text.contains(['\n', '\t']))
+}
+
+/// A cell's width on one line without laying it out: the sum of its
+/// characters' advances, given by `advance(c, code)`, plus
+/// [`PAIR_ALLOWANCE`] for each neighbouring pair in the body face that is not
+/// two digits — or infinite when [`breaks_line`] says no width will do.
+///
+/// Pairs are counted within a span and not across two, because egui shapes
+/// each run of one style on its own and never kerns across the seam.
+fn summed_width(cell: &[markdown::Span], mut advance: impl FnMut(char, bool) -> f32) -> f32 {
+    if breaks_line(cell) {
+        return f32::INFINITY;
+    }
+    let mut width = 0.0;
+    for span in cell {
+        let code = span.style.code;
+        let mut before: Option<char> = None;
+        for c in span.text.chars() {
+            width += advance(c, code);
+            if let Some(b) = before {
+                if !code && !(b.is_ascii_digit() && c.is_ascii_digit()) {
+                    width += PAIR_ALLOWANCE;
+                }
+            }
+            before = Some(c);
+        }
+    }
+    width
+}
+
+/// The advances a table has asked egui for this frame, so a sheet of
+/// thousands of numbers asks once per digit rather than once per character.
+/// ASCII, which is nearly everything a spreadsheet holds, sits in a flat
+/// table; anything else in a map.
+struct Advances {
+    ascii: [f32; 256],
+    other: std::collections::HashMap<(char, bool), f32>,
+}
+
+impl Advances {
+    fn new() -> Self {
+        Self {
+            ascii: [f32::NAN; 256],
+            other: std::collections::HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, fonts: &mut egui::epaint::FontsView<'_>, c: char, code: bool) -> f32 {
+        if c.is_ascii() {
+            let slot = &mut self.ascii[(usize::from(code) << 7) | c as usize];
+            if slot.is_nan() {
+                *slot = glyph_advance(fonts, c, code);
+            }
+            *slot
+        } else {
+            *self
+                .other
+                .entry((c, code))
+                .or_insert_with(|| glyph_advance(fonts, c, code))
+        }
+    }
+}
+
+/// How far `c` moves the pen in a table cell, in the face [`md_job`] draws it
+/// in: the body face, or the monospace one for inline code.
+///
+/// egui answers 0 for a character no face has, but draws such a character as
+/// its replacement box, so that box's width is what is counted for it; a
+/// character that really is zero-width is counted the same way, which errs
+/// wide. egui's figure also leaves out a face's size tweak, which for its
+/// emoji faces only shrinks the glyphs, so that errs wide too.
+fn glyph_advance(fonts: &mut egui::epaint::FontsView<'_>, c: char, code: bool) -> f32 {
+    let font = if code {
+        egui::FontId::monospace(BODY - 1.0)
+    } else {
+        egui::FontId::proportional(BODY)
+    };
+    let width = fonts.glyph_width(&font, c);
+    if width > 0.0 {
+        width
+    } else {
+        fonts
+            .glyph_width(&font, '◻')
+            .max(fonts.glyph_width(&font, '?'))
+    }
+}
+
 /// Draw a table at `y` and return how tall it was.
 ///
 /// Columns are fixed before any row is drawn ([`column_widths`]), so a cell's
@@ -898,13 +1026,20 @@ fn md_table(
     let pad_left = |c: usize| if c == 0 { 0.0 } else { CELL_PAD_X };
     let head = (!header.is_empty()).then_some(header);
 
-    // Natural widths, from one-line layouts. These are measured at full
-    // opacity in one colour whatever the cell's own, so the layouts are the
-    // same jobs every frame — a crossfade does not make egui lay the whole
-    // table out again just to learn widths that did not change.
+    // Natural widths, from one-line layouts of the header and the first
+    // `MEASURE_ROWS` rows. These are laid out at full opacity in one colour
+    // whatever the cell's own, so the layouts are the same jobs every frame —
+    // a crossfade does not make egui lay the whole table out again just to
+    // learn widths that did not change. Every row measured keeps its cells'
+    // one-line widths in `one_line`, a row of `columns` at a time, which is
+    // how the row loop below learns whether a row fits on one line without
+    // measuring it twice.
     let mut widest = vec![0.0f32; columns];
-    let measured = rows.iter().take(MEASURE_ROWS).map(Vec::as_slice);
-    for row in head.into_iter().chain(measured) {
+    let mut one_line: Vec<f32> = Vec::new();
+    let laid = rows.iter().take(MEASURE_ROWS).map(Vec::as_slice);
+    for row in head.into_iter().chain(laid) {
+        let start = one_line.len();
+        one_line.resize(start + columns, 0.0);
         for (c, cell) in row.iter().enumerate().take(columns) {
             if cell.is_empty() {
                 continue;
@@ -918,8 +1053,35 @@ fn md_table(
                 palette.subtext1,
             ));
             widest[c] = widest[c].max(galley.size().x);
+            one_line[start + c] = if breaks_line(cell) {
+                f32::INFINITY
+            } else {
+                galley.size().x
+            };
         }
     }
+    // …and from summed advances for the rows after those, as far as
+    // `ESTIMATE_CELLS` reaches. A cell with a line break or a tab in it has no
+    // one-line width and does not size its column; its row is laid out
+    // whenever its height is wanted, and it wraps in the column it is given.
+    let mut advances = Advances::new();
+    let summed = rows
+        .iter()
+        .skip(MEASURE_ROWS)
+        .take(ESTIMATE_CELLS / columns);
+    painter.fonts_mut(|fonts| {
+        for row in summed {
+            let start = one_line.len();
+            one_line.resize(start + columns, 0.0);
+            for (c, cell) in row.iter().enumerate().take(columns) {
+                let width = summed_width(cell, |ch, code| advances.get(fonts, ch, code));
+                one_line[start + c] = width;
+                if width.is_finite() {
+                    widest[c] = widest[c].max(width);
+                }
+            }
+        }
+    });
     let natural: Vec<f32> = widest
         .iter()
         .enumerate()
@@ -939,6 +1101,31 @@ fn md_table(
         )
         .size()
         .y;
+    // A row's height is the tallest line in it, and inline code is drawn in
+    // the monospace face, whose line height is its own.
+    let code_line = painter
+        .layout_no_wrap(
+            " ".to_owned(),
+            egui::FontId::monospace(BODY - 1.0),
+            egui::Color32::TRANSPARENT,
+        )
+        .size()
+        .y;
+    let inner: Vec<f32> = widths
+        .iter()
+        .enumerate()
+        .map(|(c, width)| (width - pad_left(c) - CELL_PAD_X).max(0.0))
+        .collect();
+    // What a cell's one-line width must stay within for it not to wrap: the
+    // width it is laid out at, less the half a pixel egui can add to a run by
+    // snapping each glyph to the pixel grid.
+    let half_pixel = 0.5 / painter.pixels_per_point();
+    let room: Vec<f32> = inner
+        .iter()
+        .map(|inner| inner + WRAP_SLACK - half_pixel)
+        .collect();
+    let shows =
+        |top: f32, height: f32| top + height + 1.0 >= content.top() && top <= content.bottom();
 
     let total = usize::from(head.is_some()) + rows.len();
     let body = rows.iter().map(|row| (row.as_slice(), false));
@@ -953,6 +1140,34 @@ fn md_table(
             top += (total - index) as f32 * (LINE + CELL_PAD_Y * 2.0 + 1.0);
             break;
         }
+        // A row the pane does not show is wanted only for its height, and a
+        // row whose every cell fits its column on one line is exactly one
+        // line tall — so such a row is never laid out. Whether it fits comes
+        // from the one-line widths the sizing pass found, and for a row past
+        // where that pass reached, from its cells' summed advances now (see
+        // [`PAIR_ALLOWANCE`]); a row that might wrap is laid out like any
+        // other.
+        let fits = match one_line.get(index * columns..(index + 1) * columns) {
+            Some(cells) => cells.iter().zip(&room).all(|(width, room)| width <= room),
+            None => painter.fonts_mut(|fonts| {
+                row.iter().zip(&room).all(|(cell, &room)| {
+                    summed_width(cell, |ch, code| advances.get(fonts, ch, code)) <= room
+                })
+            }),
+        };
+        if fits {
+            let has_code = row
+                .iter()
+                .take(columns)
+                .flatten()
+                .any(|span| span.style.code && !span.text.is_empty());
+            let tallest = if has_code { line.max(code_line) } else { line };
+            let height = tallest + CELL_PAD_Y * 2.0;
+            if !shows(top, height) {
+                top += height + 1.0;
+                continue;
+            }
+        }
         // egui has no bold face (see `md_job`), so the header is bold the way
         // a `**span**` is: at `text`, a step brighter than the body.
         let base = if is_header {
@@ -963,8 +1178,7 @@ fn md_table(
         cells.clear();
         let mut tallest = line;
         let mut left = content.left();
-        for (c, &width) in widths.iter().enumerate() {
-            let inner = (width - pad_left(c) - CELL_PAD_X).max(0.0);
+        for (c, (&width, &inner)) in widths.iter().zip(&inner).enumerate() {
             let galley = row.get(c).filter(|cell| !cell.is_empty()).map(|cell| {
                 let mut job = md_job(cell, palette, alpha, inner + WRAP_SLACK, BODY, base);
                 // egui lines each wrapped row up against the galley's
@@ -993,7 +1207,7 @@ fn md_table(
         let height = tallest + CELL_PAD_Y * 2.0;
         // Rows above and below the pane are measured, since their heights are
         // the scroll extent, but only those that show are painted.
-        if top + height + 1.0 >= content.top() && top <= content.bottom() {
+        if shows(top, height) {
             for (anchor, galley) in cells.drain(..) {
                 if let Some(galley) = galley {
                     painter.galley(egui::pos2(anchor, top + CELL_PAD_Y), galley, base);
@@ -2964,6 +3178,277 @@ mod tests {
                 0.0
             );
         });
+    }
+
+    fn text_cell(text: &str, code: bool) -> Vec<markdown::Span> {
+        vec![markdown::Span {
+            text: text.to_string(),
+            style: markdown::Style {
+                code,
+                ..Default::default()
+            },
+        }]
+    }
+
+    #[test]
+    fn a_summed_width_allows_for_kerning_between_letters_only() {
+        let fixed = |_: char, _: bool| 10.0;
+        // Two letters are one pair, and may kern.
+        let width = summed_width(&text_cell("ab", false), fixed);
+        assert!((width - (20.0 + PAIR_ALLOWANCE)).abs() < 1e-4, "{width}");
+        // Two digits never do, and nothing in the code face does.
+        assert_eq!(summed_width(&text_cell("12345", false), fixed), 50.0);
+        assert_eq!(summed_width(&text_cell("abc", true), fixed), 30.0);
+        // A digit beside a letter or a separator is a pair like any other.
+        let width = summed_width(&text_cell("1,2", false), fixed);
+        assert!(
+            (width - (30.0 + 2.0 * PAIR_ALLOWANCE)).abs() < 1e-4,
+            "{width}"
+        );
+        // Nothing kerns across two spans, and each character is asked for in
+        // the face its span is drawn in.
+        let mut cell = text_cell("a", false);
+        cell.extend(text_cell("b", true));
+        let mut seen = Vec::new();
+        let width = summed_width(&cell, |c, code| {
+            seen.push((c, code));
+            10.0
+        });
+        assert_eq!(width, 20.0);
+        assert_eq!(seen, [('a', false), ('b', true)]);
+        assert_eq!(summed_width(&[], fixed), 0.0);
+        // A line break or a tab is not something a sum can answer for.
+        assert_eq!(
+            summed_width(&text_cell("1\n2", false), fixed),
+            f32::INFINITY
+        );
+        assert_eq!(summed_width(&text_cell("a\tb", true), fixed), f32::INFINITY);
+    }
+
+    /// Lay `text` out on one line in the face `code` picks and return its
+    /// width, with what [`summed_width`] makes of it and the half pixel egui
+    /// may add by snapping glyphs to pixels — plus the thirty-second of a
+    /// point it rounds a galley's width to.
+    fn laid_and_summed(
+        painter: &egui::Painter,
+        palette: &crate::theme::Palette,
+        text: &str,
+        code: bool,
+    ) -> (f32, f32, f32) {
+        let cell = text_cell(text, code);
+        let laid = painter
+            .layout_job(md_job(
+                &cell,
+                palette,
+                1.0,
+                f32::INFINITY,
+                BODY,
+                palette.subtext1,
+            ))
+            .size()
+            .x;
+        let summed =
+            painter.fonts_mut(|fonts| summed_width(&cell, |c, code| glyph_advance(fonts, c, code)));
+        let snap = 0.5 / painter.pixels_per_point() + egui::emath::GUI_ROUNDING;
+        (laid, summed, snap)
+    }
+
+    /// The facts [`PAIR_ALLOWANCE`] rests on, over every pair of printable
+    /// ASCII characters: two digits in the body face, and any two in the
+    /// monospace face of inline code, lay out no wider than their advances;
+    /// any other pair in the body face, no wider than its advances and the
+    /// allowance. A change of font that breaks one of these fails here.
+    #[test]
+    fn the_faces_kern_as_the_summed_width_assumes() {
+        let ctx = egui::Context::default();
+        let _ = crate::icons::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            let painter = ui.painter();
+            let printable: Vec<char> = (b'!'..=b'~').map(char::from).collect();
+            for &a in &printable {
+                for &b in &printable {
+                    let pair = format!("{a}{b}");
+                    for code in [false, true] {
+                        let (laid, summed, snap) = laid_and_summed(painter, &palette, &pair, code);
+                        let exact = code || (a.is_ascii_digit() && b.is_ascii_digit());
+                        let advances = if exact {
+                            summed
+                        } else {
+                            summed - PAIR_ALLOWANCE
+                        };
+                        assert!(
+                            laid <= summed + snap,
+                            "{pair:?} (code {code}) lays out at {laid}, \
+                             over its advances {advances} and allowance"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// The summed width must never come out narrower than what egui lays
+    /// out, or a row off the pane would be counted one line tall when it
+    /// wraps: checked against the faces this program draws with, the Nerd
+    /// Font included when the machine has one, on the characters that are
+    /// wider than they look — digraphs, the per-mille sign, kerned pairs,
+    /// CJK, emoji, a combining accent and a character no face has.
+    #[test]
+    fn summed_widths_are_never_narrower_than_the_layout() {
+        let ctx = egui::Context::default();
+        let _ = crate::icons::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            let painter = ui.painter();
+            let samples = [
+                "0123456789",
+                "1,234,567.89",
+                "Hello, World",
+                "AVAVAV To Ty Wa",
+                "[][][] (()) {{}}",
+                "office ﬁle",
+                "ǄǄǄ ᾪᾪᾪ ‰‰‰",
+                "日本語 한국어",
+                "😀🚀👍",
+                "e\u{301}e\u{301}",
+                "\u{10FFFD}\u{10FFFD}",
+                "WWWWWWWWWW",
+                "a\u{2009}b\u{202F}c",
+            ];
+            for text in samples {
+                for code in [false, true] {
+                    let (laid, summed, snap) = laid_and_summed(painter, &palette, text, code);
+                    assert!(
+                        laid <= summed + snap,
+                        "{text:?} (code {code}): summed {summed} under laid out {laid}"
+                    );
+                }
+            }
+        });
+    }
+
+    /// A numeric spreadsheet far taller than the pane, scrolled to its last
+    /// row and then to its first: the rows the pane does not show are
+    /// counted by their advances, not laid out, and still come to exactly the
+    /// height laying them out would have given. Its first column is a row
+    /// number, three digits wide in the rows the sizing pass lays out and
+    /// four from row 1000: the summed rows widen the column to hold it, so no
+    /// row number wraps.
+    #[test]
+    fn rows_off_the_pane_are_not_laid_out() {
+        use markdown::{Align, Span};
+        let columns = 4;
+        let count = 2000;
+        let rows: Vec<Vec<Vec<Span>>> = (0..count)
+            .map(|r| {
+                (0..columns)
+                    .map(|c| {
+                        let text = if c == 0 {
+                            r.to_string()
+                        } else {
+                            format!("{:05}", r * columns + c)
+                        };
+                        text_cell(&text, false)
+                    })
+                    .collect()
+            })
+            .collect();
+        let align = vec![Align::Right; columns];
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        with_painter(|painter, palette| {
+            let one = md_table(painter, palette, content, 0.0, &align, &[], &rows[..1], 1.0);
+            let galleys = || painter.fonts(|fonts| fonts.num_galleys_in_cache());
+            // What may be laid out: the sizing pass's rows, the rows that
+            // show, and the two one-line measures.
+            let shown = (content.height() / one).ceil() as usize + 2;
+            let allowed = (MEASURE_ROWS + shown) * columns + 2;
+
+            let before = galleys();
+            let top = content.bottom() - count as f32 * one;
+            let height = md_table(painter, palette, content, top, &align, &[], &rows, 1.0);
+            let made = galleys() - before;
+            assert!(
+                (height - count as f32 * one).abs() < 1e-2,
+                "{height} for {count} rows of {one}"
+            );
+            assert!(
+                made <= allowed,
+                "{made} layouts scrolled to the bottom, {allowed} allowed"
+            );
+
+            // From the top, the rows within a screenful below the pane are
+            // counted rather than laid out, and the rest are estimated.
+            let before = galleys();
+            let _ = md_table(painter, palette, content, 0.0, &align, &[], &rows, 1.0);
+            let made = galleys() - before;
+            assert!(
+                made <= allowed,
+                "{made} layouts at the top, {allowed} allowed"
+            );
+        });
+    }
+
+    /// A row the pane does not show is still laid out when it might not be
+    /// one line: here, past the rows the sizing pass lays out and above the
+    /// pane, a cell with a line break in it, and a run of per-mille signs that
+    /// one em a character would have said fit the pane but which is wider
+    /// than it, so wider than any column can be. Laid out, each is taller
+    /// than a line, which a row counted one line tall would not be.
+    #[test]
+    fn a_wide_glyph_or_a_line_break_still_lays_its_row_out() {
+        use markdown::{Align, Span};
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // One column: no left padding, so its text has the pane less the
+        // right padding.
+        let text_width = content.width() - CELL_PAD_X;
+        let count = (text_width / BODY).floor() as usize;
+        let table = |special: bool| -> Vec<Vec<Vec<Span>>> {
+            (0..2000)
+                .map(|r| {
+                    let text = match r {
+                        1000 if special => "1\n2".to_string(),
+                        1001 if special => "‰".repeat(count),
+                        _ => r.to_string(),
+                    };
+                    vec![text_cell(&text, false)]
+                })
+                .collect()
+        };
+        let mut heights = [0.0f32; 2];
+        let mut line = 0.0;
+        for (special, height) in [false, true].into_iter().zip(&mut heights) {
+            with_painter(|painter, palette| {
+                let per_mille = painter.fonts_mut(|fonts| glyph_advance(fonts, '‰', false));
+                assert!(
+                    count as f32 * per_mille > text_width + WRAP_SLACK,
+                    "{count} per-mille signs at {per_mille} fit {text_width}"
+                );
+                line = painter
+                    .layout_no_wrap(
+                        " ".to_owned(),
+                        egui::FontId::proportional(BODY),
+                        egui::Color32::TRANSPARENT,
+                    )
+                    .size()
+                    .y;
+                // The pane is on row 1500: rows 1000 and 1001 are above it.
+                *height = md_table(
+                    painter,
+                    palette,
+                    content,
+                    -1500.0 * (line + CELL_PAD_Y * 2.0 + 1.0),
+                    &[Align::Left],
+                    &[],
+                    &table(special),
+                    1.0,
+                );
+            });
+        }
+        assert!(
+            heights[1] - heights[0] >= line * 2.0 - 1e-2,
+            "{heights:?}: the two rows were not laid out (a line is {line})"
+        );
     }
 
     #[test]
