@@ -173,6 +173,39 @@ mod tests {
         assert_eq!(image.get_pixel(399, 199).0[3], 0);
     }
 
+    /// A drawing with nothing behind it comes back clear where it is clear
+    /// — alpha 0 in every corner, not black — and its edge, which tiny-skia
+    /// holds premultiplied, comes back in the drawing's own colour at the
+    /// coverage it has.
+    #[test]
+    fn a_transparent_drawing_is_clear_around_its_picture() {
+        let disc = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <circle cx="50" cy="50" r="30" fill="#89b4fa"/>
+</svg>"##;
+        let image = render(disc, (100, 100)).expect("an SVG");
+        assert_eq!(image.dimensions(), (100, 100));
+        for (x, y) in [(0, 0), (99, 0), (0, 99), (99, 99)] {
+            assert_eq!(image.get_pixel(x, y).0[3], 0, "the corner {x},{y}");
+        }
+        assert_eq!(image.get_pixel(50, 50).0, [0x89, 0xb4, 0xfa, 255]);
+        // At half coverage and more, where demultiplying loses at most a
+        // step or two of each channel to rounding.
+        let edge: Vec<[u8; 4]> = image
+            .pixels()
+            .map(|p| p.0)
+            .filter(|p| (128..255).contains(&p[3]))
+            .collect();
+        assert!(!edge.is_empty(), "no antialiased edge");
+        for pixel in edge {
+            for (got, want) in pixel[..3].iter().zip([0x89u8, 0xb4, 0xfa]) {
+                assert!(
+                    got.abs_diff(want) <= 2,
+                    "an edge pixel {pixel:?} is darkened"
+                );
+            }
+        }
+    }
+
     /// Not an SVG — a PNG's bytes, text that is not markup, markup that is
     /// not SVG, broken SVG — is no picture here, and costs no font loading.
     #[test]
