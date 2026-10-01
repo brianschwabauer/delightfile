@@ -21019,10 +21019,24 @@ impl ApplicationHandler<crate::Wake> for App {
         // question nobody asked. `about_to_wait` runs on this same pass and
         // folds the deadline into `repaint_at`, so the frame that *was* asked
         // for still happens, at the time it was asked for.
-        let delayed_only = self
-            .delayed_repaints
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok();
+        // Taken one off unless it is nought, as `fetch_update` did: written
+        // out because current stable deprecates that name for `try_update`,
+        // which the Rust Linux builds with does not have yet.
+        let mut pending = self.delayed_repaints.load(Ordering::Relaxed);
+        let delayed_only = loop {
+            if pending == 0 {
+                break false;
+            }
+            match self.delayed_repaints.compare_exchange_weak(
+                pending,
+                pending - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break true,
+                Err(now) => pending = now,
+            }
+        };
         if frame_log_enabled() {
             log::info!("wake{}", if delayed_only { " (delayed)" } else { "" });
         }
