@@ -341,6 +341,9 @@ fn kind_word(kind: &PreviewKind) -> Option<&'static str> {
         PreviewKind::Model3d => Some("3d model"),
         PreviewKind::Gcode => Some("g-code"),
         PreviewKind::Archive => Some("archive"),
+        // The picture is a thumbnail the document carries, not the document,
+        // and the corner says so.
+        PreviewKind::Affinity => Some("embedded preview"),
         PreviewKind::Image => None,
         _ => None,
     }
@@ -501,6 +504,15 @@ enum Body {
     /// There is nothing honest to draw; the opener rules are the answer.
     Unsupported {
         kind: PreviewKind,
+    },
+    /// A document whose picture is not in it, described: what it is, and
+    /// the list's facts about it (an Affinity file with no thumbnail).
+    Card {
+        what: &'static str,
+        name: String,
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+        created: Option<std::time::SystemTime>,
     },
     /// The read itself failed — permission denied, and the like.
     Failed(String),
@@ -1549,6 +1561,20 @@ impl Pane {
             Preview::Directory { entries, truncated } => Body::Directory { entries, truncated },
             Preview::Hex { bytes, truncated } => Body::Hex { bytes, truncated },
             Preview::Unsupported { kind } => Body::Unsupported { kind },
+            Preview::Card {
+                what,
+                name,
+                len,
+                modified,
+                created,
+                ..
+            } => Body::Card {
+                what,
+                name,
+                len,
+                modified,
+                created,
+            },
             Preview::NeedsDecode {
                 kind,
                 path,

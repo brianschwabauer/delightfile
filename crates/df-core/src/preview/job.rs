@@ -195,6 +195,18 @@ pub enum Preview {
     },
     /// There is nothing honest to draw; the opener rules are the answer.
     Unsupported { kind: PreviewKind },
+    /// A file whose picture is not in it, described instead: an Affinity
+    /// document with no thumbnail ([`super::affinity`]). What it is, and the
+    /// facts the list has about it.
+    Card {
+        kind: PreviewKind,
+        /// What a person calls it: "Affinity Designer document".
+        what: &'static str,
+        name: String,
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+        created: Option<std::time::SystemTime>,
+    },
 }
 
 /// One update from the worker pool.
@@ -520,6 +532,18 @@ pub fn build(request: &PreviewRequest, sort: &SortOptions) -> Result<Preview> {
             Ok(Preview::Hex { bytes, truncated })
         }
         PreviewKind::Unsupported | PreviewKind::Denied => Ok(Preview::Unsupported { kind }),
+        // Its thumbnail is its picture, decoded in df-app like any other;
+        // with none in it, it is described, never dumped as hex.
+        PreviewKind::Affinity if !matches!(super::affinity::thumbnail(path), Ok(Some(_))) => {
+            Ok(Preview::Card {
+                kind,
+                what: super::affinity::what(&entry.name),
+                name: entry.name.clone(),
+                len: entry.len,
+                modified: entry.mtime,
+                created: entry.btime,
+            })
+        }
         // Images, video, audio, PDFs, fonts and models — and archives and
         // G-code, which need a reader df-core does not have either. All of
         // them leave through the same seam, and df-app answers them.
@@ -789,6 +813,51 @@ mod tests {
                 assert_eq!(p, path);
             }
             other => panic!("expected a decode request, got {other:?}"),
+        }
+    }
+
+    /// An Affinity document is a picture when it carries its thumbnail and
+    /// a card that says what it is when it does not — never a hexdump, which
+    /// is what its bytes were before it had a kind (W4.45).
+    #[test]
+    fn an_affinity_file_is_its_thumbnail_or_its_card() {
+        use crate::preview::affinity::tests::{affinity, noise};
+        let (with, _, _) = affinity(true);
+        let path = write("Logo.afdesign", &with);
+        match build_one(&path) {
+            Preview::NeedsDecode { kind, thumb, .. } => {
+                assert_eq!(kind, PreviewKind::Affinity);
+                assert_eq!(thumb, None, "no yazi thumbnail is looked for");
+            }
+            other => panic!("expected a decode request, got {other:?}"),
+        }
+        // Named for nothing Affinity: the signature says what it is.
+        let path = write("mystery.bin", &with);
+        assert!(matches!(
+            build_one(&path),
+            Preview::NeedsDecode {
+                kind: PreviewKind::Affinity,
+                ..
+            }
+        ));
+        let without = [crate::preview::affinity::MAGIC, &noise(20_000, 9)].concat();
+        let path = write("Cover v1.af", &without);
+        match build_one(&path) {
+            Preview::Card {
+                kind,
+                what,
+                name,
+                len,
+                modified,
+                ..
+            } => {
+                assert_eq!(kind, PreviewKind::Affinity);
+                assert_eq!(what, "Affinity document");
+                assert_eq!(name, "Cover v1.af");
+                assert_eq!(len, without.len() as u64);
+                assert!(modified.is_some());
+            }
+            other => panic!("expected a card, got {other:?}"),
         }
     }
 

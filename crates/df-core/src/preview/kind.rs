@@ -54,6 +54,10 @@ pub enum PreviewKind {
     Gcode,
     /// zip/tar/7z/rar and the compressed singletons: a listing of contents.
     Archive,
+    /// An Affinity document, whose picture is the thumbnail it carries
+    /// ([`super::affinity`]), or, where it carries none, its card
+    /// ([`super::Preview::Card`]).
+    Affinity,
     /// Bytes with no previewer, shown as a hexdump.
     Binary,
     /// Nothing to draw; the opener rules are the whole answer. Office
@@ -79,6 +83,7 @@ impl PreviewKind {
                 | PreviewKind::Pdf
                 | PreviewKind::Font
                 | PreviewKind::Model3d
+                | PreviewKind::Affinity
         )
     }
 
@@ -111,6 +116,9 @@ const EXACT: &[(&str, PreviewKind)] = &[
     // because that is what the user means by it.
     ("image/svg+xml", PreviewKind::Image),
     ("application/pdf", PreviewKind::Pdf),
+    // A picture to a person, Serif's own container to everything else: its
+    // thumbnail, never its bytes (`super::affinity`).
+    ("application/x-affinity", PreviewKind::Affinity),
     // Archives, including the compressed singletons that are not really
     // archives — `.gz` of one file still lists as its contents.
     ("application/zip", PreviewKind::Archive),
@@ -241,6 +249,11 @@ mod tests {
             ("song.flac", "audio/flac", PreviewKind::Audio),
             ("song.opus", "audio/opus", PreviewKind::Audio),
             ("book.pdf", "application/pdf", PreviewKind::Pdf),
+            (
+                "Logo.afdesign",
+                "application/x-affinity",
+                PreviewKind::Affinity,
+            ),
             ("face.ttf", "font/ttf", PreviewKind::Font),
             ("part.stl", "model/stl", PreviewKind::Model3d),
             ("part.3mf", "model/3mf", PreviewKind::Model3d),

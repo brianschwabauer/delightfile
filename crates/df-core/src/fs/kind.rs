@@ -481,7 +481,7 @@ fn language_kind(name: &str) -> Option<FileKind> {
 fn from_preview(kind: PreviewKind) -> FileKind {
     match kind {
         PreviewKind::Directory => FileKind::Directory,
-        PreviewKind::Image => FileKind::Image,
+        PreviewKind::Image | PreviewKind::Affinity => FileKind::Image,
         PreviewKind::Video => FileKind::Video,
         PreviewKind::Audio => FileKind::Audio,
         PreviewKind::Pdf => FileKind::Document,

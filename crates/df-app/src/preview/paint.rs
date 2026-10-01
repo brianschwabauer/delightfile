@@ -124,6 +124,21 @@ pub fn preview(
             quiet(paint, content, unsupported_text(kind), alpha);
             0
         }
+        Body::Card {
+            what,
+            name,
+            len,
+            modified,
+            created,
+        } => {
+            card(
+                paint,
+                content,
+                &card_lines(what, name, *len, *modified, *created),
+                alpha,
+            );
+            0
+        }
         Body::Text {
             lines,
             syntax,
@@ -247,6 +262,73 @@ fn quiet_note(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32)
         galley,
         color,
     );
+}
+
+/// A document's card, line by line: its name, what it is, its size, and
+/// when it was changed and made, where the file system says.
+fn card_lines(
+    what: &str,
+    name: &str,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+) -> Vec<String> {
+    let mut lines = vec![
+        name.to_string(),
+        what.to_string(),
+        crate::format::human_size(len),
+    ];
+    if modified.is_some() {
+        lines.push(format!("Modified {}", crate::format::long_stamp(modified)));
+    }
+    if created.is_some() {
+        lines.push(format!("Created {}", crate::format::long_stamp(created)));
+    }
+    lines
+}
+
+/// The card a document with no picture of itself gets in place of one: its
+/// lines centred in the pane, set as the audio card sets a song's — the
+/// first, its name, larger and in the text's colour, the rest quieter
+/// (`crate::playback::strip::audio_card`). Each line is cut to the pane's
+/// width with `…`, a long name included.
+fn card(paint: &Painting<'_>, content: egui::Rect, lines: &[String], alpha: f32) {
+    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+    const LINE_HEIGHT: f32 = 20.0;
+    let centre = egui::pos2(
+        content.center().x,
+        content.top() + content.height() * crate::chrome::OPTICAL_CENTRE,
+    );
+    let top = centre.y - (lines.len() as f32 - 1.0) * LINE_HEIGHT / 2.0;
+    for (i, line) in lines.iter().enumerate() {
+        let (size, color) = if i == 0 {
+            (18.0, paint.palette.text)
+        } else {
+            (13.0, paint.palette.faint)
+        };
+        let color = color.gamma_multiply(alpha);
+        let mut job = LayoutJob::single_section(
+            line.clone(),
+            TextFormat {
+                font_id: egui::FontId::proportional(size),
+                color,
+                ..Default::default()
+            },
+        );
+        job.wrap = TextWrapping {
+            max_width: (content.width() - 2.0 * CHIP_PAD).max(0.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = paint.painter.layout_job(job);
+        let y = top + i as f32 * LINE_HEIGHT;
+        paint.painter.galley(
+            egui::pos2(centre.x - galley.size().x / 2.0, y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
 }
 
 /// What a file with no previewer says. Never "error": these are all files that
@@ -1912,6 +1994,13 @@ mod tests {
             Body::Unsupported {
                 kind: PreviewKind::Denied,
             },
+            Body::Card {
+                what: "Affinity Designer document",
+                name: "A name long enough to be cut at the pane's edge.afdesign".repeat(4),
+                len: 778_896,
+                modified: Some(std::time::SystemTime::now()),
+                created: None,
+            },
             Body::Text {
                 states: highlight::block_states(&lines, profile),
                 lines: lines.clone(),
@@ -2290,6 +2379,20 @@ mod tests {
         assert!((zoomed.center() - content.center()).length() < 1e-3);
     }
 
+    /// A document's card says its name, what it is, its size, and the dates
+    /// the file system has, in that order; a date it does not have is left
+    /// out rather than shown as a dash.
+    #[test]
+    fn a_card_says_what_the_file_is() {
+        let lines = card_lines("Affinity Photo document", "Shot.afphoto", 1536, None, None);
+        assert_eq!(lines, ["Shot.afphoto", "Affinity Photo document", "1.5 KB"]);
+        let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 400);
+        let lines = card_lines("Affinity document", "x.af", 10, Some(when), Some(when));
+        assert_eq!(lines.len(), 5);
+        assert!(lines[3].starts_with("Modified 1971-"), "{lines:?}");
+        assert!(lines[4].starts_with("Created 1971-"), "{lines:?}");
+    }
+
     #[test]
     fn a_degenerate_page_does_not_produce_a_nan() {
         for size in [(0u32, 0u32), (100, 0), (0, 100)] {
@@ -2308,6 +2411,19 @@ mod tests {
             Body::Empty => Body::Empty,
             Body::Failed(m) => Body::Failed(m.clone()),
             Body::Unsupported { kind } => Body::Unsupported { kind: kind.clone() },
+            Body::Card {
+                what,
+                name,
+                len,
+                modified,
+                created,
+            } => Body::Card {
+                what,
+                name: name.clone(),
+                len: *len,
+                modified: *modified,
+                created: *created,
+            },
             Body::Text {
                 lines,
                 syntax,

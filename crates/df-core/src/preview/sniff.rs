@@ -89,6 +89,8 @@ const MAGIC: &[(&[u8], &str)] = &[
     // Documents.
     (b"%PDF-", "application/pdf"),
     (b"{\\rtf", "application/rtf"),
+    // Affinity's container, whichever app saved it (`preview::affinity`).
+    (b"\x00\xffKA", "application/x-affinity"),
     // Archives and compression.
     (b"\x1f\x8b", "application/gzip"),
     (b"\xfd7zXZ\x00", "application/x-xz"),

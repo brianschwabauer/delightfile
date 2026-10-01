@@ -70,6 +70,12 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("wav", "audio/wav"),
     ("wma", "audio/x-ms-wma"),
     // Documents.
+    // Affinity's, whose one container every app saves (preview::affinity).
+    ("af", "application/x-affinity"),
+    ("afdesign", "application/x-affinity"),
+    ("afphoto", "application/x-affinity"),
+    ("afpub", "application/x-affinity"),
+    ("aftemplate", "application/x-affinity"),
     ("doc", "application/msword"),
     (
         "docx",

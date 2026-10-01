@@ -75,6 +75,9 @@
 //! rasterises vectors; delightviewer does it with `resvg`, which is a real
 //! dependency and therefore a decision for its own commit. Until then an SVG
 //! reports "no decoder", which is honest and is not a crash.
+//!
+//! **An Affinity document's picture is its thumbnail**, a PNG it carries
+//! ([`Full::Embedded`], `df_core::preview::affinity`), decoded as any other.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -197,6 +200,10 @@ pub enum Full {
     /// music, and a 400 MB FLAC is not read into memory to find a JPEG at its
     /// front.
     CoverArt,
+    /// The file is a document that carries a picture of itself: an Affinity
+    /// file's thumbnail ([`df_core::preview::affinity::thumbnail`]), found
+    /// without reading the document and decoded as the PNG it is.
+    Embedded,
 }
 
 /// What the pane asks the worker for, for one file: the part of a request that
@@ -221,6 +228,7 @@ pub fn plan(kind: &PreviewKind, cached: bool) -> Plan {
     let full = match kind {
         PreviewKind::Image => Full::File,
         PreviewKind::Audio => Full::CoverArt,
+        PreviewKind::Affinity => Full::Embedded,
         _ => Full::Elsewhere,
     };
     let fetches = full != Full::Elsewhere;
@@ -394,6 +402,10 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
             log::debug!("{}: no cover art: {e}", path.display());
             None
         })),
+        // A thumbnail df-core has already seen is there (`Preview::Card` is
+        // what a file without one becomes); one gone since is nothing to
+        // draw, as a song with no sleeve is.
+        Full::Embedded => decode_embedded(&path, target),
         Full::File => read_source(&path).and_then(|read| {
             let still = decode_bytes(&path, &read, target);
             bytes = Some(read);
@@ -745,6 +757,16 @@ fn decode_cover(path: &Path, target: (u32, u32)) -> Result<Option<Rgba>, String>
         image::DynamicImage::ImageRgba8(image),
         target,
     )))
+}
+
+/// The picture a document carries of itself — an Affinity file's thumbnail
+/// — fitted to `target`. `Ok(None)` is a file with none.
+fn decode_embedded(path: &Path, target: (u32, u32)) -> Result<Option<Rgba>, String> {
+    match df_core::preview::affinity::thumbnail(path) {
+        Ok(Some(png)) => decode_bytes(path, &png, target).map(Some),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Fit `(w, h)` inside `target`, never enlarging.
@@ -1140,6 +1162,50 @@ mod tests {
         std::fs::write(&bad, b"this is not a png").expect("write");
         assert!(decode_file(&bad, (200, 200)).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An Affinity file's picture is its thumbnail, a real PNG inside it,
+    /// decoded and fitted like any other; the plan asks for it and writes
+    /// nothing to the shared cache, which yazi never reads such a file into.
+    #[test]
+    fn an_affinity_file_decodes_its_thumbnail() {
+        assert_eq!(
+            plan(&PreviewKind::Affinity, false),
+            Plan {
+                full: Full::Embedded,
+                store: false,
+                decoding: true,
+            }
+        );
+        let dir = std::env::temp_dir().join(format!("df-decode-af-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let thumb = image::RgbaImage::from_fn(512, 256, |x, _| image::Rgba([x as u8, 0, 0, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(thumb)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode");
+        // The header, then the record the header points at, then the PNG.
+        let mut file = df_core::preview::affinity::MAGIC.to_vec();
+        file.resize(64, 0);
+        let at = file.len() as u64;
+        file[24..32].copy_from_slice(&at.to_le_bytes());
+        file.extend_from_slice(b"\xff\xff\xff\xffThmb");
+        file.extend_from_slice(&1u32.to_le_bytes());
+        file.extend_from_slice(&(png.len() as u32 + 13).to_le_bytes());
+        file.extend_from_slice(&29u64.to_le_bytes());
+        file.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        file.push(1);
+        file.extend_from_slice(&png);
+        let path = dir.join("Logo.afdesign");
+        std::fs::write(&path, &file).expect("write the fixture");
+        let decoded = decode_embedded(&path, (256, 256))
+            .expect("decode")
+            .expect("a thumbnail");
+        assert_eq!((decoded.width, decoded.height), (256, 128));
+        let none = dir.join("Empty.af");
+        std::fs::write(&none, df_core::preview::affinity::MAGIC).expect("write");
+        assert!(matches!(decode_embedded(&none, (256, 256)), Ok(None)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -42,6 +42,7 @@
 //! the crate, and they are the previews that must never fail — hence the caps
 //! in [`job`], every one of them a named constant with a reason.
 
+pub mod affinity;
 pub mod cache;
 pub mod job;
 pub mod kind;
