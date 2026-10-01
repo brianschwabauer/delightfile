@@ -70,11 +70,13 @@
 //! GIF somebody downloaded is: [`ANIM_BUDGET_BYTES`] of decoded pixels and
 //! [`ANIM_MAX_FRAMES`] frames. Past either, what has been sent *is* the loop.
 //!
-//! **SVG is the known gap.** df-core routes `image/svg+xml` to the image
-//! previewer (a picture is what the user means by it) but neither decoder
-//! rasterises vectors; delightviewer does it with `resvg`, which is a real
-//! dependency and therefore a decision for its own commit. Until then an SVG
-//! reports "no decoder", which is honest and is not a crash.
+//! **An SVG is FFmpeg's on Linux and resvg's elsewhere.** df-core routes
+//! `image/svg+xml` to the image previewer (a picture is what the user means
+//! by it), and the `image` crate does not rasterise vectors. On Linux FFmpeg
+//! does, through the librsvg Arch builds it with; the FFmpeg the Windows zip
+//! and the macOS app carry has no librsvg, so there the platform draws one
+//! first, with resvg ([`crate::platform::svg::render`], W4.44), and on Linux
+//! that call says nothing and FFmpeg answers as before.
 //!
 //! **An Affinity document's picture is its thumbnail**, a PNG it carries
 //! ([`Full::Embedded`], `df_core::preview::affinity`), decoded as any other.
@@ -725,11 +727,24 @@ fn read_source(path: &Path) -> Result<Vec<u8>, String> {
 fn decode_bytes(path: &Path, bytes: &[u8], target: (u32, u32)) -> Result<Rgba, String> {
     match image::load_from_memory(bytes) {
         Ok(image) => Ok(scale_dynamic(image, target)),
-        // Not a format the `image` crate was built with — which is the AVIF and
-        // HEIC path, and the one PLAN §6 cares about most.
-        Err(first) => ffmpeg_still(path, target).inspect_err(|_| {
-            log::debug!("{}: image crate said: {first}", path.display());
-        }),
+        Err(first) => {
+            // An SVG, where the platform draws one itself (macOS and
+            // Windows, whose FFmpeg has no librsvg; on Linux this says
+            // nothing and FFmpeg draws it, W4.44). Drawn to fit, so not
+            // scaled again.
+            if let Some(drawn) = crate::platform::svg::render(bytes, target) {
+                return Ok(Rgba {
+                    width: drawn.width(),
+                    height: drawn.height(),
+                    pixels: drawn.into_raw(),
+                });
+            }
+            // Not a format the `image` crate was built with — which is the
+            // AVIF and HEIC path, and the one PLAN §6 cares about most.
+            ffmpeg_still(path, target).inspect_err(|_| {
+                log::debug!("{}: image crate said: {first}", path.display());
+            })
+        }
     }
 }
 

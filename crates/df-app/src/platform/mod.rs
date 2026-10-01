@@ -64,6 +64,7 @@
 //! | `menubar::start` | `fn(app::Waker)`, once, after the window is made | nothing | macOS: the menu bar made, and handed to the application with the first rows `publish` brings; Windows nothing | M2.37 |
 //! | `menubar::publish` | `fn(&[menu::Item], &Registry)`, every frame where `MENU_BUTTON` is `false`: the app menu's rows as the ☰ button would open them now | never called | macOS: kept, each of the bar's menus built from the latest as it opens ([`mirror`] says where each row goes); Windows never called | M2.37 |
 //! | `menubar::take` | `fn() -> Vec<menu::Action>`: what was chosen in the menu bar since the last frame, for the window to do as the ☰ menu's rows | empty | macOS: the rows chosen, queued by the items' target, the window's bell rung for each; Windows empty | M2.37 |
+//! | `svg::render` | `fn(&[u8], (u32, u32)) -> Option<image::RgbaImage>`: an SVG's bytes drawn to fit the pane's physical pixels, straight alpha, before the preview hands a picture to FFmpeg | `None`: FFmpeg draws one through librsvg, as it did | macOS and Windows: resvg (`svg.rs`, shared), its words in the faces of `fonts::dirs`, `None` for bytes that are not an SVG | W4.44 |
 //! | `fonts::dirs` | `fn() -> Vec<PathBuf>`, where a Nerd Font is looked for, in order | `/usr/share/fonts/…`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts` | macOS: `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts{,/Supplemental}`; Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `C:\Windows\Fonts` | S1.29 |
 //! | `trash::{LISTED_NOTE, EMPTIED_NOTE}` | `Option<&str>`: what the trash view says it cannot see, under an empty view and after "Empty trash" | `None`: the view is the whole freedesktop trash | macOS: only what delightfile trashed is listed and emptied, Finder's Trash may hold more (M2.9); Windows: `None`, there is no trash view | M2.9 |
 //! | `trash::{SYSTEM_BIN, RESTORED_ELSEWHERE}` | `Option<&str>`: the system's own trash, opened in place of the trash view — and, where there is one, what "Empty trash" counts and empties whole (`dialog::ConfirmKind::EmptyBin`) — and what `u` after a trash says when it cannot be taken back here | `None`, `None` | macOS `None`, `None`; Windows `shell:RecycleBinFolder`, "Restore it from the Recycle Bin" | W4.8 |
@@ -140,6 +141,11 @@ mod caption;
 /// target's tests.
 #[cfg(any(target_os = "macos", test))]
 mod mirror;
+
+/// An SVG drawn with resvg: macOS's and Windows', whose FFmpeg has no
+/// librsvg; Linux's FFmpeg draws one (`linux/svg.rs`).
+#[cfg(any(target_os = "macos", windows))]
+pub mod svg;
 
 /// The app menu stays the ☰ button's: Linux's and Windows' stand-in for
 /// macOS's menu bar (`macos/menubar.rs`).

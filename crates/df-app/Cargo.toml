@@ -62,6 +62,23 @@ ttf-parser = "0.25"
 # `preview::doc::model`.
 miniz_oxide.workspace = true
 
+# SVG pictures in the preview, on macOS and Windows only (04-windows.md
+# W4.44). Linux's FFmpeg decodes an SVG through librsvg, which Arch builds it
+# with; the FFmpeg the Windows zip and the macOS app carry has no librsvg, so
+# there an SVG was "no decoder". An SVG renderer is the case the dependency
+# rule's "rewriting is impractical" was written for (a CSS-and-XML parser,
+# a path and gradient rasteriser and a text shaper), so resvg, at the version
+# delightviewer pins: `text` for an SVG's words, set in the system's faces
+# (`platform::fonts::dirs`, loaded only for an SVG that has text, memory-mapped
+# so the Fonts folder is not read whole), and no raster images, no `.svgz`,
+# no fontconfig. Linux builds none of it: `platform::svg::render` is FFmpeg's
+# there, as it was.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+resvg = { version = "0.48", default-features = false, features = [
+    "text",
+    "memmap-fonts",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # PLAN §7.1's drag out and drop in. `wayland-client` rather than
 # `smithay-client-toolkit`: every interface a data-device drag needs is in the
