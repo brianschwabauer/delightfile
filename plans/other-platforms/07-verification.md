@@ -362,6 +362,13 @@ workflow, launched by double-click from Explorer.
 - [ ] Maximized (W4.39): nothing is cut off at the top, no strip of the
       window hangs off the screen, and the band's controls answer; restored,
       the window is where it was.
+- [ ] Left alone (W4.47): after the last key a toast rises, rests and goes
+      by itself, a copy's bar in the tasks panel (`w`) moves to done, and a
+      file made by another program appears in the listing, all with nothing
+      touched; with `DF_FRAME_LOG=1` (the log through PowerShell's
+      `Start-Process -RedirectStandardError`) the settled window logs no
+      frame. Judge a 2.2 s notice by eye or by the log, not by a screenshot
+      taken seconds later; an undo toast (8 s) is easier to catch.
 
 ### 5.2 Keyboard
 - [ ] All the Linux default bindings with Ctrl and Alt; AltGr on a German layout
@@ -443,6 +450,9 @@ workflow, launched by double-click from Explorer.
 - [ ] An SVG (W4.44): a drawing with a gradient, a path and words previews
       as its picture, fitted to the pane, the words in a system face; not
       "no decoder".
+- [ ] An SVG or a PNG with clear parts: the pane's ground shows through them
+      on its first visit and on every visit after, in a later run too — today
+      black from the second run on (04-windows.md, Open questions).
 - [ ] An Affinity file (W4.45): an `.afdesign` or `.af` with its thumbnail
       previews as that picture with "embedded preview" in the corner; one
       without is a card with its name, "Affinity … document", its size and
@@ -679,6 +689,51 @@ release zip is run.
       Media Player Legacy under More options, and Just once with no Always
       (`30-…`); Esc closed it, no toast, the window answering the pointer
       at once (`31-…`).
+- 2026-10-01, the repaint agent (`port/windows-repaint`, W4.47 and the
+  SVG's black, 04-windows.md §14) — the same VM, signed in; no restart.
+  Builds in the share as `delightfile\repaint-<sha>\`, each with
+  `samples\` (`disc.svg`, a blue disc on nothing; `logo.svg`; `a folder`;
+  a 1 GiB `big.bin` of zeros) and launchers that set `DF_FRAME_LOG=1` and
+  start the program through PowerShell's `Start-Process
+  -RedirectStandardError`, the log in `logs\` (cmd's `2>` does not reach
+  a windows-subsystem program: its log went to the console). Screenshots
+  and logs in `repaint/shots/` and `repaint/logs/` in the agent's
+  scratchpad. Nothing on the VM was changed outside those folders.
+  - Run 36921679025 (6fd5c2a, `main`), log in the console: `u` with
+    nothing to undo, then screenshots seconds later with no toast
+    (`01-…`, `02-…`); the console's lines were the end of a fade, the toast
+    long gone (`04-…`). `j` did not move the cursor, as on 2026-09-29
+    (`05-…`); a hovered row lit at once (`06-…`).
+  - Run 36926544921 (d62bd26, 6fd5c2a with a frame-log probe, not kept),
+    with its present mode and loop as `main`'s (`DF_REST=old`):
+    - `u` from idle: the key's frame took 23 ms, the next was asked for on
+      the way into a `Wait` and came 4 ms later; the rise ran, a 1.65 s
+      deadline woke the loop as `ResumeTimeReached`, and the fade ran, with
+      no input after the key (`logs/frames-old.log`, 21:30:18–21:30:20).
+    - A file made from the host (`zz-from-linux.txt`) appeared in the
+      listing with no input at all, its frame the watcher's (`16-…`).
+    - `a`, `zz-made.txt`, Enter: "Created file zz-made.txt · u undo" was on
+      screen after the key (`17-…`) and gone by itself 8 s on (`18-…`); in
+      the log the rise came on deadlines after the key and the fade on one
+      5.5 s out.
+    - `y` on `big.bin`, Enter on `a folder`, `p`, `w`, hands off: the
+      task's bar at 177 MB of 1.0 GB (`19-…`), at 493 MB (`20-…`), done
+      with "Copied 1 item · u undo" up (`21-…`), and the toast gone by
+      itself (`22-…`); no input after the `w` in the log, the frames the
+      task's and the deadlines'. From the toast's end the window drew
+      nothing for the 23 s until it was closed.
+    - Earlier the same session, a screenshot right after `u` had no toast
+      with Mailbox (`08-…`), and had it with the same probe under
+      `DF_PRESENT=fifo` (`12-…`) and with run 36930234032 (6efe128, Fifo on
+      Windows, not kept; `23-…`); a screenshot a second after `p` had none
+      with either (`10-…`, `24-…`). The tool's actions come seconds apart
+      (a key and the next pointer move 5.1 s apart in the log) and a notice
+      lives 2.2 s, so whether one is caught is chance; the states above,
+      which last, settle it. W4.47 is the viewer, not the window.
+    - `disc.svg`: clear around the disc on its first visit (`14-…`) and on
+      a second visit in the same run; in the next run, over a black square
+      (`15-…`), the yazi-cache JPEG the first visit wrote (04-windows.md,
+      Decisions log and Open questions).
 
 ## 6. Release gate
 
@@ -733,6 +788,13 @@ release zip is run.
   says what the shell now asks (W4.7's `FOF_WANTNUKEWARNING`). §5.8 records
   that this round's VM check was not made: a sign-in screen, then a viewer
   that stopped answering.
+
+- (repaint) 2026-10-01 — §5.1 gained the window left alone (W4.47), with
+  the warning that a screenshot through the viewer comes seconds after a
+  key, longer than a notice lives; §5.6 gained a picture with clear parts,
+  open until the Open question in 04-windows.md is decided; §5.8 records
+  the round, and how to get the frame log out of a windows-subsystem
+  program on the VM.
 
 ## Open questions
 

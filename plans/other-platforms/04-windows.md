@@ -787,6 +787,31 @@ the calls the brief left to the builder are in the Decisions log, marked
       and a mixed path, and the VM's breadcrumb after `g D`.
       — done 6e4eac7, green at run 36905030633. VM: §5.8.
 
+## 14. Follow-ups to the first round, 2026-10-01
+
+Two things the first round's VM run left open. Branch `port/windows-repaint`,
+from `main` at 6fd5c2a.
+
+- [x] **W4.47** Whether a frame no input brings reaches the screen on
+      Windows: the first round saw toasts only while keys or the pointer
+      drove frames (the Open question it left). **It does; nothing was
+      wrong.** A build of 6fd5c2a's code with a frame-log probe (d62bd26,
+      not kept; its present mode and its loop as `main` has them) was run on
+      the VM with the log in a file: a toast rose, rested and faded on the
+      loop's own deadlines with no input, and on screen a `Created file`
+      toast was up after the key and gone by itself, a copy's bar went from
+      177 MB to 493 MB to done and its undo toast came and went with nothing
+      touched, and a row for a file made from the host appeared with no input
+      at all. Once everything had settled the window drew no frame for the
+      23 s until it was closed. What the first round saw was the viewer: the
+      browser tool's actions reach the VM seconds apart (a key and the next
+      pointer move 5.1 s apart in the log), a notice lives 2.2 s, and so a
+      screenshot after a key mostly came after the toast had gone. Done
+      when: the log shows the deadlines firing with no input, and the VM
+      shows a toast come and go, a bar move and a row appear untouched.
+      — checked, no change; the probe and a Fifo build were measured and
+      dropped (Decisions log). VM: §5.8.
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.
@@ -1448,6 +1473,41 @@ the calls the brief left to the builder are in the Decisions log, marked
   runners, on current stable, refused the one call in `app.rs` under
   `-D warnings` — red on `main` since 849a416. It is a compare-and-swap loop
   now (557a184), since Arch's 1.98 has no `try_update`.
+- (repaint) 2026-10-01 — W4.47: the brief suspected the loop (a deadline
+  timer, `WaitUntil`, `RedrawRequested` on Windows), so the loop was
+  measured first. The probe logged winit's `StartCause`, the rest
+  `about_to_wait` chose and every repaint decision. A key from idle drew a
+  frame slower than a refresh (about 20 ms on WARP, the log going to the
+  share), asked for the next on the way to sleep with the loop still on
+  `Wait`, and the next came 4 ms later (`WaitCancelled`): the `WM_PAINT`
+  that `request_redraw` leaves does end `MsgWaitForMultipleObjectsEx`. The
+  toast's fade deadline 1.65 s on woke the loop as `ResumeTimeReached`. A
+  rest that never sleeps on a frame owed now was written and dropped, there
+  being nothing for it to fix.
+- (repaint) 2026-10-01 — W4.47: a detour, kept here so it is not taken
+  again. Screenshots taken seconds after a key showed no toast while the log
+  had drawn one, and Fifo was tried (the probe with `DF_PRESENT=fifo`, then
+  a build of 6efe128, run 36930234032, that took it on Windows: a sync
+  interval of 1, where Mailbox's is 0). Fifo's screenshot right after `u`
+  had the toast both times where Mailbox's had not, and a screenshot a
+  second after `p` had none under either. Read against the log, each of
+  those screenshots fell after the toast's 2.2 s or inside them by chance;
+  the viewer, not the present mode, was the difference, and the states that
+  last (a bar, a row, an 8 s toast) showed Mailbox's frames on screen. Fifo
+  was dropped, and Windows presents with Mailbox as before.
+- (repaint) 2026-10-01 — The black around an SVG on Windows (W4.44) is not
+  resvg's: `platform::svg::render` hands back alpha 0 where the drawing is
+  clear (`a_transparent_drawing_is_clear_around_its_picture`, on both
+  runners). The first visit to a file writes its picture to the yazi cache
+  as a JPEG (`decode::write_thumb`, `to_rgb8`), which has no alpha, so what
+  was clear is black there; every later visit shows that JPEG as the
+  placeholder and draws the real picture over it at full strength
+  (`paint::media_body` keeps the placeholder under the picture), and the
+  black shows through the clear parts. Seen on the VM: a disc clear on its
+  first visit and over a black square in the next run (§5.8). Nothing in it
+  is Windows': the same code writes and reads the cache on Linux, for a
+  transparent PNG as for an SVG (read in the code, not looked at on a Linux
+  screen), so the fix is a decision (Open questions).
 
 ## Open questions
 
@@ -1461,9 +1521,17 @@ the calls the brief left to the builder are in the Decisions log, marked
   Viewer", "Open with…"); Linux's does the same (`zed`, `edit`), so it is
   not of this round. Options: the descriptions in the menu on every
   platform (a Linux change); friendlier Windows ids; leave it.
-- (polish, 2026-10-01) On the VM a toast is drawn only in a frame some input
-  brings: "Nothing to undo" and "Installed Hack Regular" showed when keys
-  or the pointer drove frames, and none showed while the window was left
-  alone, so a toast that comes from a worker after the input has stopped
-  waits for the next input. Seen on this branch's builds; whether `main`'s
-  does the same was not looked at, and nothing here touched the wake.
+- (repaint, 2026-10-01) A picture with clear parts shows black through them
+  from its second visit on, on every platform: the yazi-cache JPEG its first
+  visit wrote is drawn under it (Decisions log, W4.44). Options: (a) the
+  placeholder is dropped once the picture has faded in over it — one line
+  in `paint::media_body`, but the black still shows through the crossfade
+  and goes at its end; (b) the decode worker says whether a picture has a
+  pixel that is not opaque, the pane drops the placeholder the moment such
+  a picture lands, and no JPEG is written for it — no black once the
+  picture is up, an alpha scan per decode on the worker, and such a file has
+  no cached thumbnail of delightfile's making, so the grid decodes it whole;
+  (c) on macOS and Windows only, an SVG drawn by resvg is neither written
+  to nor read from the cache — Linux untouched, but a transparent PNG keeps
+  the black everywhere, and so does an SVG on Linux. (a) and (b) change what
+  Linux shows for such a file.
