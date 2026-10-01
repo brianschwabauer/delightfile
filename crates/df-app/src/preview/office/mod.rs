@@ -565,10 +565,15 @@ fn unescape(text: &str) -> Cow<'_, str> {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         let after = &rest[at..];
-        // The longest reference is `&#x10FFFF;`, ten bytes.
-        let decoded = after[..after.len().min(12)]
-            .find(';')
-            .and_then(|end| entity(&after[1..end]).map(|c| (c, end)));
+        // The longest reference is `&#x10FFFF;`, ten characters, so the
+        // semicolon is looked for no further than that — counted in
+        // characters, because a byte count can land inside the `é` that
+        // follows an `&` in "R&é".
+        let decoded = after
+            .char_indices()
+            .take(12)
+            .find(|(_, c)| *c == ';')
+            .and_then(|(end, _)| entity(&after[1..end]).map(|c| (c, end)));
         match decoded {
             Some((c, end)) => {
                 out.push(c);
@@ -818,6 +823,71 @@ mod tests {
             "fish & chips &bogus; \u{fffd}"
         );
         assert!(matches!(unescape("plain"), Cow::Borrowed("plain")));
+        assert_eq!(unescape("Tom &amp; Jerry café"), "Tom & Jerry café");
+    }
+
+    /// The semicolon is looked for a few characters past an `&`, never a few
+    /// bytes: wherever a multi-byte character falls in that window — after a
+    /// reference, after a bare `&`, in the middle of where the window would
+    /// end — the text decodes, and nothing is cut inside a character.
+    #[test]
+    fn an_ampersand_beside_multi_byte_text_is_never_cut_inside_a_character() {
+        for wide in ["é", "日", "☺", "🖼"] {
+            for gap in 0..16 {
+                let bare = format!("R&{}{}", "a".repeat(gap), wide.repeat(8));
+                assert_eq!(unescape(&bare), bare, "{bare}");
+                let kept = format!("{}&amp;{}", wide.repeat(gap), wide.repeat(8));
+                assert_eq!(
+                    unescape(&kept),
+                    format!("{}&{}", wide.repeat(gap), wide.repeat(8)),
+                    "{kept}"
+                );
+                let numbered = format!("&#{}{}", "1".repeat(gap % 4 + 1), wide.repeat(gap));
+                // Unterminated: kept as written, whatever follows.
+                assert_eq!(unescape(&numbered), numbered, "{numbered}");
+            }
+        }
+    }
+
+    /// A document whose every text node and attribute value is non-ASCII,
+    /// with entities and tags on both sides of the multi-byte characters.
+    #[test]
+    fn a_part_that_is_all_multi_byte_text_scans_whole() {
+        let xml = r#"<?xml version="1.0"?><w:document xmlns:w="ü"><w:body>
+            <w:p><w:pPr><w:pStyle w:val="Überschrift1"/></w:pPr><w:r><w:t>Ünïcödé &amp; ŝtüff</w:t></w:r></w:p>
+            <w:p><w:r><w:t>日本語&lt;テキスト&gt;日本語</w:t></w:r><w:r><w:t xml:space="preserve"> ☺&#x263A;☺ </w:t></w:r></w:p>
+            <w:p><w:hyperlink w:tooltip="ü&gt;é&amp;ö"><w:r><w:t>é&amp;é&#233;é</w:t></w:r></w:hyperlink></w:p>
+            <w:p><w:r><w:t>R&é — Ünd 🖼&quot;🖼</w:t></w:r></w:p>
+            </w:body></w:document>"#;
+        let texts: Vec<String> = scan(xml)
+            .filter_map(|event| match event {
+                Event::Text(text) if !text.trim().is_empty() => Some(text.into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Ünïcödé & ŝtüff",
+                "日本語<テキスト>日本語",
+                " ☺☺☺ ",
+                "é&ééé",
+                "R&é — Ünd 🖼\"🖼",
+            ]
+        );
+        let tooltip = scan(xml).find_map(|event| match event {
+            Event::Start {
+                name: "hyperlink",
+                attrs,
+            } => attr(attrs, "tooltip").map(Cow::into_owned),
+            _ => None,
+        });
+        assert_eq!(tooltip.as_deref(), Some("ü>é&ö"));
+        let blocks = blocks(&[
+            ("[Content_Types].xml", "<Types/>"),
+            ("word/document.xml", xml),
+        ]);
+        assert_eq!(blocks.len(), 7, "{blocks:?}");
     }
 
     #[test]
