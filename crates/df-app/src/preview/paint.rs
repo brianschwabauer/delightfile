@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use df_core::config::LineMode;
 use df_core::fs::Entry;
-use df_core::preview::PreviewKind;
+use df_core::preview::{PreviewKind, PreviewToken};
 
 use crate::scrollbar;
 use crate::theme::mix;
@@ -163,6 +163,7 @@ pub fn preview(
             *truncated,
             pane.scroll,
             alpha,
+            pane.token,
         ),
         Body::Directory { entries, truncated } => directory_body(
             paint,
@@ -534,6 +535,7 @@ fn markdown_body(
     truncated: bool,
     scroll: usize,
     alpha: f32,
+    document: Option<PreviewToken>,
 ) -> usize {
     // Markdown blocks are variable height, so the scroll is converted from
     // lines (what `K`/`J` speak) to points here, at the text body's line
@@ -541,7 +543,7 @@ fn markdown_body(
     let offset = scroll as f32 * LINE;
     let mut y = content.top() - offset;
     for block in blocks {
-        let height = md_block(paint, painter, content, y, block, alpha);
+        let height = md_block(paint, painter, content, y, block, alpha, document);
         y += height;
         // Everything past the bottom still has to be *measured* — the scroll
         // extent is the sum of the heights — but nothing past it is painted,
@@ -573,6 +575,9 @@ fn rows_in(content: egui::Rect) -> usize {
 }
 
 /// Draw one markdown block at `y` and return how tall it was.
+///
+/// `document` is the request token the body arrived under, which tells one
+/// document's tables from the next's (see [`SizingKey`]).
 fn md_block(
     paint: &Painting<'_>,
     painter: &egui::Painter,
@@ -580,6 +585,7 @@ fn md_block(
     y: f32,
     block: &markdown::Block,
     alpha: f32,
+    document: Option<PreviewToken>,
 ) -> f32 {
     let palette = paint.palette;
     match block {
@@ -634,7 +640,18 @@ fn md_block(
             align,
             header,
             rows,
-        } => md_table(painter, palette, content, y, align, header, rows, alpha),
+        } => md_table(
+            painter,
+            palette,
+            content,
+            y,
+            document,
+            std::ptr::from_ref(block).addr(),
+            align,
+            header,
+            rows,
+            alpha,
+        ),
         markdown::Block::Paragraph(spans) => {
             let galley = painter.layout_job(md_job(
                 spans,
@@ -770,23 +787,30 @@ const COLUMN_SHARE: f32 = 0.5;
 /// to lay every cell out on one line. Two hundred rows is more than any table
 /// written by hand. Past them, a spreadsheet of five hundred rows by eight
 /// columns would be another two thousand four hundred layouts for egui to
-/// make and then look up every frame, so the rows after these are measured by
-/// adding up their glyphs' advances instead (see [`PAIR_ALLOWANCE`]) — which
-/// is what keeps an ID column that reaches four digits at row 1000 from
-/// wrapping in a column sized for three.
+/// make the first frame the sheet is drawn, which is the frame a reader is
+/// waiting on, so the rows after these are measured by adding up their
+/// glyphs' advances instead (see [`PAIR_ALLOWANCE`]) — which is what keeps an
+/// ID column that reaches four digits at row 1000 from wrapping in a column
+/// sized for three.
 const MEASURE_ROWS: usize = 200;
 
 /// How many cells past [`MEASURE_ROWS`] the column widths, and the one-line
-/// test for rows the pane does not show, are worked out from summed advances.
+/// test for rows the pane does not show, are worked out from summed advances
+/// when a table is sized.
 ///
 /// Summing is a lookup per character against a table of advances filled as
-/// the frame meets them, cheap enough to run over a whole sheet every frame —
-/// up to a point: a table of fifty thousand cells measured at about four
-/// milliseconds a frame in the development build, sizing and rows together.
-/// That is a sheet of thirty columns by more than sixteen hundred rows, past
-/// where a preview is the way anyone reads a spreadsheet. Beyond it a wider
-/// cell wraps in the column it is given, and a row is summed only when it is
-/// near enough the pane to be asked about.
+/// the pass meets them, and the pass runs once per table rather than once per
+/// frame ([`SIZINGS`]), so this caps the first frame and what is kept. In the
+/// development build a table of fifty thousand cells took 35 to 45 ms the
+/// first frame that measured it, most of it egui laying out the two hundred
+/// rows measured, and a quarter of a millisecond a frame after. Fifty
+/// thousand cells is a sheet of thirty columns by more than sixteen hundred
+/// rows: more than the Excel reader hands over, and past where a preview is
+/// the way anyone reads a spreadsheet. Beyond it a wider cell wraps in the
+/// column it is given, and a row is summed when a frame first measures it,
+/// its height then kept like any other ([`Sizing::heights`]); a hand-written
+/// table of twenty thousand rows by four columns, scrolled to its end, took
+/// about 9 ms the first frame and a tenth of a millisecond after.
 const ESTIMATE_CELLS: usize = 50_000;
 
 /// Extra wrap width a cell is laid out with. egui rounds a measured width to a
@@ -1000,40 +1024,102 @@ fn glyph_advance(fonts: &mut egui::epaint::FontsView<'_>, c: char, code: bool) -
     }
 }
 
-/// Draw a table at `y` and return how tall it was.
+/// What a table's sizing pass finds, kept across frames in [`SIZINGS`].
+struct Sizing {
+    /// Each column's width with its widest cell on one line, padding
+    /// included — what [`column_widths`] fits to the pane.
+    natural: Vec<f32>,
+    /// The one-line width of every cell the pass measured, `columns` to a
+    /// row, header first; infinite for a cell [`breaks_line`] rules out.
+    one_line: Vec<f32>,
+    /// Each row's height, header first, once a frame has found it.
+    ///
+    /// A row the pane does not show is wanted for its height alone, and one
+    /// that wraps can only learn it by being laid out — every frame, for every
+    /// wrapped row above the pane, which is what a sheet of numbers squeezed
+    /// into columns too narrow for them costs. Kept here, it is laid out once.
+    /// The heights live and die with the entry, and the key that finds the
+    /// entry is everything a height depends on: the table, the pane's width
+    /// its columns are fitted to, and the pixel density.
+    heights: Vec<std::cell::Cell<Option<f32>>>,
+}
+
+/// Which table, measured how, a kept [`Sizing`] belongs to.
 ///
-/// Columns are fixed before any row is drawn ([`column_widths`]), so a cell's
-/// text wraps inside its column and a row is as tall as its tallest cell. The
-/// only lines are horizontal — a hairline under each row, a stronger one under
-/// the header — with no grid, border or plate: the columns' alignment already
-/// says where one stops and the next starts, and a grid of boxes in a pane
-/// this narrow would be more lines than text.
-#[allow(clippy::too_many_arguments)]
-fn md_table(
+/// `document`, the request token the body arrived under, says which document:
+/// df-core never hands a token out twice, and the pane drops what it shows
+/// whenever it asks for another file, so a markdown body is only ever painted
+/// under its own token. `block`, the block's address, says which table in it:
+/// a document's blocks stay where they are for as long as it is shown. The
+/// address alone would not do — when the pane moves to another file the old
+/// blocks are freed, and the new document's table can land exactly where the
+/// last one was, with as many rows and columns and, for two months of one
+/// report, the same characters in its first rows — but no two documents share
+/// a token. `chars`, the number of characters in the header and the rows the
+/// sizing pass lays out, stays as a second guard, for a body painted with no
+/// token and for a table changed where it stands. The pixel density is in the
+/// key because egui's layouts depend on it, and the pane's width because the
+/// widths a sizing comes to, and the row heights kept with it, are fitted to
+/// it; a pane being dragged wider is a new entry every frame.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SizingKey {
+    document: Option<PreviewToken>,
+    block: usize,
+    rows: usize,
+    columns: usize,
+    width: u32,
+    pixels_per_point: u32,
+    chars: usize,
+}
+
+/// How many tables' sizings are kept: 64, and when one more is wanted they
+/// are all let go at once.
+///
+/// More than a workbook has sheets, so scrolling through one measures each
+/// sheet once. A document with more tables than this, all of them measured
+/// every frame, fills and empties the store each frame and is measured as if
+/// nothing were kept — what a store small enough to need no eviction order
+/// costs.
+const SIZINGS_KEPT: usize = 64;
+
+thread_local! {
+    /// The sizings kept from earlier frames.
+    ///
+    /// `markdown_body` measures every block above the pane on every frame, so
+    /// without this a table scrolled past would lay out its first two hundred
+    /// rows and sum the rest each frame for as long as the document is open —
+    /// a workbook of twenty sheets scrolled to its last, some three hundred
+    /// thousand cells a frame. In the development build twenty sheets of five
+    /// hundred rows by thirty columns of numbers, scrolled past, took about a
+    /// quarter of a second the first frame that measured them and 1.2 ms a
+    /// frame after, where sizing them afresh had cost some 40 ms a frame. With
+    /// numbers too wide for columns squeezed to their floor, so that every row
+    /// wraps, the first frame took 0.8 s and each after 1.4 ms — 100 ms
+    /// before the rows' heights were kept with the sizing. A thread-local
+    /// rather than a field of the pane, because only the painter needs it and
+    /// the painter runs on one thread.
+    static SIZINGS: std::cell::RefCell<
+        std::collections::HashMap<SizingKey, std::rc::Rc<Sizing>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Measure a table's columns: its natural widths, and the one-line width of
+/// every cell measured on the way.
+fn size_table(
     painter: &egui::Painter,
     palette: &crate::theme::Palette,
-    content: egui::Rect,
-    y: f32,
-    align: &[markdown::Align],
-    header: &[Vec<markdown::Span>],
+    columns: usize,
+    head: Option<&[Vec<markdown::Span>]>,
     rows: &[Vec<Vec<markdown::Span>>],
-    alpha: f32,
-) -> f32 {
-    let columns = align.len();
-    if columns == 0 {
-        return 0.0;
-    }
+) -> Sizing {
     let pad_left = |c: usize| if c == 0 { 0.0 } else { CELL_PAD_X };
-    let head = (!header.is_empty()).then_some(header);
-
     // Natural widths, from one-line layouts of the header and the first
-    // `MEASURE_ROWS` rows. These are laid out at full opacity in one colour
-    // whatever the cell's own, so the layouts are the same jobs every frame —
-    // a crossfade does not make egui lay the whole table out again just to
-    // learn widths that did not change. Every row measured keeps its cells'
-    // one-line widths in `one_line`, a row of `columns` at a time, which is
-    // how the row loop below learns whether a row fits on one line without
-    // measuring it twice.
+    // `MEASURE_ROWS` rows, made at full opacity in one colour whatever the
+    // cell's own: colour has no say in a width, and a sizing kept from a frame
+    // mid-crossfade has to be right for every frame after. Every row measured
+    // keeps its cells' one-line widths in `one_line`, a row of `columns` at a
+    // time, which is how `md_table`'s row loop learns whether a row fits on
+    // one line without measuring it twice.
     let mut widest = vec![0.0f32; columns];
     let mut one_line: Vec<f32> = Vec::new();
     let laid = rows.iter().take(MEASURE_ROWS).map(Vec::as_slice);
@@ -1087,8 +1173,80 @@ fn md_table(
         .enumerate()
         .map(|(c, w)| w + pad_left(c) + CELL_PAD_X)
         .collect();
-    let widths = column_widths(&natural, content.width());
+    let rows_in_all = usize::from(head.is_some()) + rows.len();
+    Sizing {
+        natural,
+        one_line,
+        heights: vec![std::cell::Cell::new(None); rows_in_all],
+    }
+}
+
+/// Draw a table at `y` and return how tall it was.
+///
+/// Columns are fixed before any row is drawn ([`column_widths`]), so a cell's
+/// text wraps inside its column and a row is as tall as its tallest cell. The
+/// only lines are horizontal — a hairline under each row, a stronger one under
+/// the header — with no grid, border or plate: the columns' alignment already
+/// says where one stops and the next starts, and a grid of boxes in a pane
+/// this narrow would be more lines than text.
+///
+/// `document` and `block` — the request token the body arrived under and the
+/// address of the table's block — are what, with the rest of a
+/// [`SizingKey`], find the sizing kept from an earlier frame.
+#[allow(clippy::too_many_arguments)]
+fn md_table(
+    painter: &egui::Painter,
+    palette: &crate::theme::Palette,
+    content: egui::Rect,
+    y: f32,
+    document: Option<PreviewToken>,
+    block: usize,
+    align: &[markdown::Align],
+    header: &[Vec<markdown::Span>],
+    rows: &[Vec<Vec<markdown::Span>>],
+    alpha: f32,
+) -> f32 {
+    let columns = align.len();
+    if columns == 0 {
+        return 0.0;
+    }
+    let pad_left = |c: usize| if c == 0 { 0.0 } else { CELL_PAD_X };
+    let head = (!header.is_empty()).then_some(header);
+
+    let laid = rows.iter().take(MEASURE_ROWS).map(Vec::as_slice);
+    let key = SizingKey {
+        document,
+        block,
+        rows: rows.len(),
+        columns,
+        width: content.width().to_bits(),
+        pixels_per_point: painter.pixels_per_point().to_bits(),
+        chars: head
+            .into_iter()
+            .chain(laid)
+            .flatten()
+            .flatten()
+            .map(|span| span.text.chars().count())
+            .sum(),
+    };
+    let sizing = SIZINGS
+        .with_borrow(|kept| kept.get(&key).cloned())
+        .unwrap_or_else(|| {
+            let sizing = std::rc::Rc::new(size_table(painter, palette, columns, head, rows));
+            SIZINGS.with_borrow_mut(|kept| {
+                if kept.len() >= SIZINGS_KEPT {
+                    kept.clear();
+                }
+                kept.insert(key, sizing.clone());
+            });
+            sizing
+        });
+    let one_line = &sizing.one_line;
+    let widths = column_widths(&sizing.natural, content.width());
     let right = (content.left() + widths.iter().sum::<f32>()).min(content.right());
+    // For the rows past where the sizing reached, summed as they are asked
+    // about (see `ESTIMATE_CELLS`).
+    let mut advances = Advances::new();
 
     // A blank cell draws nothing, but a row of them is still a row: it is one
     // line tall, as it would be with a word in it, so a spreadsheet's empty
@@ -1140,30 +1298,39 @@ fn md_table(
             top += (total - index) as f32 * (LINE + CELL_PAD_Y * 2.0 + 1.0);
             break;
         }
-        // A row the pane does not show is wanted only for its height, and a
-        // row whose every cell fits its column on one line is exactly one
-        // line tall — so such a row is never laid out. Whether it fits comes
-        // from the one-line widths the sizing pass found, and for a row past
-        // where that pass reached, from its cells' summed advances now (see
-        // [`PAIR_ALLOWANCE`]); a row that might wrap is laid out like any
-        // other.
-        let fits = match one_line.get(index * columns..(index + 1) * columns) {
-            Some(cells) => cells.iter().zip(&room).all(|(width, room)| width <= room),
-            None => painter.fonts_mut(|fonts| {
-                row.iter().zip(&room).all(|(cell, &room)| {
-                    summed_width(cell, |ch, code| advances.get(fonts, ch, code)) <= room
-                })
-            }),
-        };
-        if fits {
-            let has_code = row
-                .iter()
-                .take(columns)
-                .flatten()
-                .any(|span| span.style.code && !span.text.is_empty());
-            let tallest = if has_code { line.max(code_line) } else { line };
-            let height = tallest + CELL_PAD_Y * 2.0;
+        // A row the pane does not show is wanted only for its height. One an
+        // earlier frame found is kept with the sizing; failing that, a row
+        // whose every cell fits its column on one line is exactly one line
+        // tall, which needs no layout either. Whether it fits comes from the
+        // one-line widths the sizing pass found, and for a row past where that
+        // pass reached, from its cells' summed advances now (see
+        // [`PAIR_ALLOWANCE`]). A row that might wrap is laid out like any
+        // other, and its height kept for the frames after.
+        let kept = sizing.heights.get(index);
+        let known = kept.and_then(std::cell::Cell::get).or_else(|| {
+            let fits = match one_line.get(index * columns..(index + 1) * columns) {
+                Some(cells) => cells.iter().zip(&room).all(|(width, room)| width <= room),
+                None => painter.fonts_mut(|fonts| {
+                    row.iter().zip(&room).all(|(cell, &room)| {
+                        summed_width(cell, |ch, code| advances.get(fonts, ch, code)) <= room
+                    })
+                }),
+            };
+            fits.then(|| {
+                let has_code = row
+                    .iter()
+                    .take(columns)
+                    .flatten()
+                    .any(|span| span.style.code && !span.text.is_empty());
+                let tallest = if has_code { line.max(code_line) } else { line };
+                tallest + CELL_PAD_Y * 2.0
+            })
+        });
+        if let Some(height) = known {
             if !shows(top, height) {
+                if let Some(kept) = kept {
+                    kept.set(Some(height));
+                }
                 top += height + 1.0;
                 continue;
             }
@@ -1205,6 +1372,9 @@ fn md_table(
             left += width;
         }
         let height = tallest + CELL_PAD_Y * 2.0;
+        if let Some(kept) = kept {
+            kept.set(Some(height));
+        }
         // Rows above and below the pane are measured, since their heights are
         // the scroll extent, but only those that show are painted.
         if shows(top, height) {
@@ -3133,13 +3303,18 @@ mod tests {
             }]
         };
         let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // Every table here is a document of its own.
+        let documents = std::cell::Cell::new(0);
         with_painter(|painter, palette| {
             let height = |header: &[Vec<Span>], rows: &[Vec<Vec<Span>>]| {
+                documents.set(documents.get() + 1);
                 md_table(
                     painter,
                     palette,
                     content,
                     0.0,
+                    Some(PreviewToken(documents.get())),
+                    rows.as_ptr().addr(),
                     &[Align::Left, Align::Right],
                     header,
                     rows,
@@ -3174,7 +3349,7 @@ mod tests {
             );
             // An empty table — no columns — takes no room.
             assert_eq!(
-                md_table(painter, palette, content, 0.0, &[], &[], &[], 1.0),
+                md_table(painter, palette, content, 0.0, None, 0, &[], &[], &[], 1.0),
                 0.0
             );
         });
@@ -3357,7 +3532,20 @@ mod tests {
         let align = vec![Align::Right; columns];
         let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
         with_painter(|painter, palette| {
-            let one = md_table(painter, palette, content, 0.0, &align, &[], &rows[..1], 1.0);
+            let document = Some(PreviewToken(1));
+            let block = rows.as_ptr().addr();
+            let one = md_table(
+                painter,
+                palette,
+                content,
+                0.0,
+                document,
+                block,
+                &align,
+                &[],
+                &rows[..1],
+                1.0,
+            );
             let galleys = || painter.fonts(|fonts| fonts.num_galleys_in_cache());
             // What may be laid out: the sizing pass's rows, the rows that
             // show, and the two one-line measures.
@@ -3366,7 +3554,18 @@ mod tests {
 
             let before = galleys();
             let top = content.bottom() - count as f32 * one;
-            let height = md_table(painter, palette, content, top, &align, &[], &rows, 1.0);
+            let height = md_table(
+                painter,
+                palette,
+                content,
+                top,
+                document,
+                block,
+                &align,
+                &[],
+                &rows,
+                1.0,
+            );
             let made = galleys() - before;
             assert!(
                 (height - count as f32 * one).abs() < 1e-2,
@@ -3380,7 +3579,18 @@ mod tests {
             // From the top, the rows within a screenful below the pane are
             // counted rather than laid out, and the rest are estimated.
             let before = galleys();
-            let _ = md_table(painter, palette, content, 0.0, &align, &[], &rows, 1.0);
+            let _ = md_table(
+                painter,
+                palette,
+                content,
+                0.0,
+                document,
+                block,
+                &align,
+                &[],
+                &rows,
+                1.0,
+            );
             let made = galleys() - before;
             assert!(
                 made <= allowed,
@@ -3433,14 +3643,20 @@ mod tests {
                     .size()
                     .y;
                 // The pane is on row 1500: rows 1000 and 1001 are above it.
+                let rows = table(special);
                 *height = md_table(
                     painter,
                     palette,
                     content,
                     -1500.0 * (line + CELL_PAD_Y * 2.0 + 1.0),
+                    // Two tables, two documents: the second may land where
+                    // the first was freed, with as many rows and the same
+                    // first two hundred, and must not be handed its sizing.
+                    Some(PreviewToken(u64::from(special))),
+                    rows.as_ptr().addr(),
                     &[Align::Left],
                     &[],
-                    &table(special),
+                    &rows,
                     1.0,
                 );
             });
@@ -3449,6 +3665,153 @@ mod tests {
             heights[1] - heights[0] >= line * 2.0 - 1e-2,
             "{heights:?}: the two rows were not laid out (a line is {line})"
         );
+    }
+
+    /// Paint `rows` as a table in frame after frame of one context, with a
+    /// frame painting nothing between each, and return how many galleys
+    /// each painting frame made, and how tall the table came out. egui keeps
+    /// a galley only while the frame before used it, so after a frame of
+    /// nothing every layout is a new galley again — and one that a frame does
+    /// not make, it did not lay out. `change` runs on the rows between
+    /// frames, which are all of one document.
+    fn layouts_per_frame(
+        rows: &mut [Vec<Vec<markdown::Span>>],
+        frames: usize,
+        mut change: impl FnMut(usize, &mut [Vec<Vec<markdown::Span>>]),
+    ) -> Vec<(usize, f32)> {
+        let columns = rows.first().map_or(0, Vec::len);
+        let align = vec![markdown::Align::Right; columns];
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // The whole table is above the pane, scrolled past.
+        let y = -(rows.len() as f32) * 100.0;
+        let palette = crate::theme::Palette::default();
+        let ctx = egui::Context::default();
+        let document = Some(PreviewToken(1));
+        let mut made = Vec::new();
+        for frame in 0..frames {
+            if frame > 0 {
+                change(frame, rows);
+                let _ = ctx.run_ui(Default::default(), |_| {});
+            }
+            let block = rows.as_ptr().addr();
+            let rows: &[Vec<Vec<markdown::Span>>] = rows;
+            let mut result = (0, 0.0);
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let painter = ui.painter();
+                let before = painter.fonts(|fonts| fonts.num_galleys_in_cache());
+                let height = md_table(
+                    painter,
+                    &palette,
+                    content,
+                    y,
+                    document,
+                    block,
+                    &align,
+                    &[],
+                    rows,
+                    1.0,
+                );
+                result = (
+                    painter.fonts(|fonts| fonts.num_galleys_in_cache()) - before,
+                    height,
+                );
+            });
+            made.push(result);
+        }
+        made
+    }
+
+    fn numeric_sheet(count: usize, columns: usize) -> Vec<Vec<Vec<markdown::Span>>> {
+        (0..count)
+            .map(|r| {
+                (0..columns)
+                    .map(|c| text_cell(&format!("{:05}", r * columns + c), false))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A table scrolled past is measured on every frame for its height, but
+    /// sized only on the first: after that its frames lay out nothing but
+    /// the two one-line measures of the faces' line heights.
+    #[test]
+    fn a_table_is_sized_once_across_frames() {
+        let columns = 3;
+        let mut rows = numeric_sheet(1000, columns);
+        let made: Vec<usize> = layouts_per_frame(&mut rows, 3, |_, _| {})
+            .into_iter()
+            .map(|(made, _)| made)
+            .collect();
+        assert!(made[0] >= MEASURE_ROWS * columns, "{made:?}");
+        assert!(made[1] <= 2 && made[2] <= 2, "{made:?}");
+    }
+
+    /// A cell that changes under the same block address — the case a freed
+    /// table's successor is — changes the key, and the table is sized again.
+    #[test]
+    fn a_changed_cell_sizes_the_table_again() {
+        let columns = 3;
+        let mut rows = numeric_sheet(1000, columns);
+        let made = layouts_per_frame(&mut rows, 2, |_, rows| {
+            rows[5][1] = text_cell("a cell that is longer now", false);
+        });
+        assert!(made[1].0 >= MEASURE_ROWS * columns, "{made:?}");
+    }
+
+    /// A sheet of numbers too wide for its columns — thirty columns squeezed
+    /// to their floor, as in a narrow pane — wraps every row, and a row that
+    /// wraps can only learn its height by being laid out. Scrolled past, those
+    /// rows are laid out on the first frame and their heights read back on
+    /// every frame after.
+    #[test]
+    fn wrapped_rows_off_the_pane_are_laid_out_once() {
+        let columns = 30;
+        let mut rows: Vec<Vec<Vec<markdown::Span>>> = (0..120)
+            .map(|r| {
+                (0..columns)
+                    .map(|c| text_cell(&format!("{:07}", r * columns + c), false))
+                    .collect()
+            })
+            .collect();
+        let frames = layouts_per_frame(&mut rows, 3, |_, _| {});
+        let one_line = LINE + CELL_PAD_Y * 2.0 + 1.0;
+        // Every row wrapped, so every cell was laid out to find out how.
+        assert!(frames[0].1 > 120.0 * one_line, "{frames:?}");
+        assert!(frames[0].0 >= 120 * columns, "{frames:?}");
+        // …once: after that only the two one-line measures, and the same
+        // height.
+        for &(made, height) in &frames[1..] {
+            assert!(made <= 2, "{frames:?}");
+            assert_eq!(height, frames[0].1, "{frames:?}");
+        }
+    }
+
+    /// The kept sizings are let go all at once when one more than
+    /// [`SIZINGS_KEPT`] is wanted.
+    #[test]
+    fn the_kept_sizings_are_let_go_when_full() {
+        let rows = numeric_sheet(3, 2);
+        let align = vec![markdown::Align::Left; 2];
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        SIZINGS.with_borrow_mut(|kept| kept.clear());
+        let document = Some(PreviewToken(1));
+        with_painter(|painter, palette| {
+            for block in 0..SIZINGS_KEPT + 6 {
+                let _ = md_table(
+                    painter,
+                    palette,
+                    content,
+                    0.0,
+                    document,
+                    block,
+                    &align,
+                    &[],
+                    &rows,
+                    1.0,
+                );
+            }
+        });
+        assert_eq!(SIZINGS.with_borrow(|kept| kept.len()), 6);
     }
 
     #[test]
