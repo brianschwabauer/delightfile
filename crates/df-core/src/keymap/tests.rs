@@ -799,6 +799,33 @@ fn overrides_replace_rebind_and_unbind() {
     );
 }
 
+/// `print` ships on no key — `Ctrl+p` is the command palette, and stays so —
+/// and is still a command a `keymap.toml` line can put on one.
+#[test]
+fn print_is_unbound_and_bindable() {
+    let mut km = Registry::defaults();
+    assert_eq!(Command::from_id("print"), Some(Command::Print));
+    assert_eq!(km.binding_label(Command::Print), None);
+    assert!(km.bindings().iter().all(|b| b.command != Command::Print));
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "ctrl+p"),
+        Dispatch::Match(Command::CommandPalette)
+    );
+    let warnings = km.apply_overrides(
+        "[files]\n\"ctrl+shift+p\" = \"print\"\n",
+        Path::new("keymap.toml"),
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "ctrl+shift+p"),
+        Dispatch::Match(Command::Print)
+    );
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "ctrl+p"),
+        Dispatch::Match(Command::CommandPalette)
+    );
+}
+
 /// A `keymap.toml` written against the old pane-focus model named a `[preview]`
 /// context and the three `parent-*` commands. None of them exists any more
 /// (PLAN §2.1), and a config that mentions them **warns and keeps going** — the

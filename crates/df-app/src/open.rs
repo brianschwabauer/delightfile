@@ -574,18 +574,26 @@ mod tests {
             vec!["delightviewer", "open", "terminal-at"]
         );
         // Text opens in Zed; the terminal editor and the system default are
-        // what `O` offers after it, and a shell in the file's folder is last.
+        // what `O` offers after it, then a shell in the file's folder, and
+        // printing last.
         assert_eq!(
             names("notes.txt", "text/plain", false),
-            vec!["zed", "edit", "open", "terminal-at"]
+            vec!["zed", "edit", "open", "terminal-at", "print"]
         );
         assert_eq!(
             names("index.html", "text/html", false),
-            vec!["zed", "open-in-chrome", "edit", "open", "terminal-at"]
+            vec![
+                "zed",
+                "open-in-chrome",
+                "edit",
+                "open",
+                "terminal-at",
+                "print"
+            ]
         );
         assert_eq!(
             names("Cargo.toml", "application/toml", false),
-            vec!["zed", "edit", "open", "terminal-at"]
+            vec!["zed", "edit", "open", "terminal-at", "print"]
         );
         assert_eq!(names("cat.png", "image/png", false)[0], "delightviewer");
         assert_eq!(
@@ -751,6 +759,36 @@ mod tests {
                 Some("extract")
             );
         }
+    }
+
+    /// A PDF, a picture, a Word file and markdown each end their choices in
+    /// printing, the built-in that puts up the desktop's print dialog; a
+    /// folder does not offer it, whatever its name says. Linux's tables: a
+    /// Mac's and Windows' do not name `print` while their platform has no
+    /// dialog behind it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn printable_files_end_in_print_and_folders_do_not() {
+        let config = Config::default();
+        for name in ["paper.pdf", "cat.png", "letter.docx", "notes.md"] {
+            let choices = choices_for(&config, &file(name));
+            let last = choices.last().expect(name);
+            assert_eq!(last.name, "print", "{name}");
+            assert_eq!(last.builtin(), Some("print"), "{name}");
+            assert_eq!(last.description, "Print…", "{name}");
+            assert!(!last.block, "{name}");
+        }
+        let mut folder = file("Papers.pdf");
+        folder.kind = df_core::fs::Kind::Dir;
+        folder.mime = df_core::fs::mime::DIR_MIME;
+        let choices = choices_for(&config, &folder);
+        assert!(!choices.is_empty(), "a folder still has its own choices");
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.builtin() != Some("print")),
+            "{choices:?}"
+        );
     }
 
     #[test]

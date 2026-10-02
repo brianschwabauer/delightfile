@@ -220,6 +220,12 @@ pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
 /// `extract` makes a folder named after the archive, `extract-here` spills it
 /// into the directory it is in, and `extract-merged` puts several archives into
 /// one folder (the picker only offers it when several are selected).
+///
+/// `print` is the fourth: the desktop's own print dialog, over a PDF of the
+/// file — the file itself when it is one, a page delightfile writes for a
+/// picture, and LibreOffice's rendering of anything else. It is Linux's
+/// alone, because Linux's is the only platform with a print dialog behind it
+/// yet; the macOS and Windows tables do not name it.
 pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
     (
         "edit",
@@ -310,6 +316,7 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
         false,
         "Extract all into one folder",
     ),
+    ("print", "builtin:print", false, "Print…"),
 ];
 
 /// Opener rules, matched top-down. Transcribed from `yazi.toml`'s
@@ -324,10 +331,17 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
 ///   manager, which from a file manager is a second copy of the program you
 ///   are already in. `terminal-at` — a shell in that folder — is the thing
 ///   you actually leave for, so it is the last entry of every file rule
-///   instead, bar bulk-rename's and the archives' (`extract`, then `open`). A
-///   rule that `reveal` was the only alternative in gets `open`, so `O` still
-///   offers the system default.
+///   instead — or the last but `print`, below — bar bulk-rename's and the
+///   archives' (`extract`, then `open`). A rule that `reveal` was the only
+///   alternative in gets `open`, so `O` still offers the system default.
 /// - **`edit` runs in a terminal** (see [`DEFAULT_OPENERS`]).
+///
+/// And one row yazi had no use for: **`print`**, last in every rule for a
+/// file a page can be made of — a PDF, a picture, text and source, and the
+/// office documents, which before it fell through to the fallback with
+/// nothing to offer but `open`. Last, after `terminal-at`, because it is the
+/// one choice that puts up a dialog and spends paper. Not on a toolpath, a
+/// model, a font, an archive, a clip or a folder.
 ///
 /// The by-name rules come first for the reason the yazi config gives: an `.obj`
 /// and a `.ply` are `text/plain` and an `.stl` is `application/octet-stream`,
@@ -364,13 +378,24 @@ pub const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     (
         "mime",
         "text/html",
-        &["zed", "open-in-chrome", "edit", "open", "terminal-at"],
+        &[
+            "zed",
+            "open-in-chrome",
+            "edit",
+            "open",
+            "terminal-at",
+            "print",
+        ],
     ),
-    ("mime", "text/*", &["zed", "edit", "open", "terminal-at"]),
+    (
+        "mime",
+        "text/*",
+        &["zed", "edit", "open", "terminal-at", "print"],
+    ),
     (
         "mime",
         "application/{json,ndjson,xml,javascript,x-shellscript,x-yaml,toml}",
-        &["zed", "edit", "open", "terminal-at"],
+        &["zed", "edit", "open", "terminal-at", "print"],
     ),
     (
         "mime",
@@ -382,6 +407,7 @@ pub const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
             "set-wallpaper",
             "edit-image",
             "terminal-at",
+            "print",
         ],
     ),
     (
@@ -397,7 +423,14 @@ pub const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     (
         "mime",
         "application/pdf",
-        &["delightviewer", "delightviewer-edit", "terminal-at"],
+        &["delightviewer", "delightviewer-edit", "terminal-at", "print"],
+    ),
+    // Word, PowerPoint and Excel, old and new, OpenDocument and RTF: the
+    // system default opens them, and LibreOffice prints them.
+    (
+        "mime",
+        "application/{msword,rtf,vnd.ms-*,vnd.openxmlformats-officedocument.*,vnd.oasis.opendocument.*}",
+        &["open", "terminal-at", "print"],
     ),
     ("glob", "*/", &["open", "zed-workspace", "terminal-here"]),
     // The fallback. yazi leaves this implicit; writing it down means the picker
@@ -2316,18 +2349,25 @@ mod tests {
             Some("delightviewer")
         );
         // Text: Zed first, then the terminal editor, then the system default,
-        // and a shell in the file's folder last.
+        // a shell in the file's folder, and printing last.
         assert_eq!(
             names(c.openers_for("notes.md", "text/markdown", false)),
-            vec!["zed", "edit", "open", "terminal-at"]
+            vec!["zed", "edit", "open", "terminal-at", "print"]
         );
         assert_eq!(
             names(c.openers_for("index.html", "text/html", false)),
-            vec!["zed", "open-in-chrome", "edit", "open", "terminal-at"]
+            vec![
+                "zed",
+                "open-in-chrome",
+                "edit",
+                "open",
+                "terminal-at",
+                "print"
+            ]
         );
         assert_eq!(
             names(c.openers_for("package.json", "application/json", false)),
-            vec!["zed", "edit", "open", "terminal-at"]
+            vec!["zed", "edit", "open", "terminal-at", "print"]
         );
         // Glob, ahead of the mime rules on purpose: a .obj is text/plain.
         assert_eq!(
@@ -2345,20 +2385,67 @@ mod tests {
             names(c.openers_for("Inter.ttf", "font/ttf", false)),
             vec!["delightviewer", "open", "terminal-at"]
         );
-        // Media and PDFs end in the same shell.
-        for (name, mime) in [
-            ("cat.png", "image/png"),
-            ("clip.mp4", "video/mp4"),
-            ("song.mp3", "audio/mpeg"),
-            ("paper.pdf", "application/pdf"),
+        // Media and PDFs end in the same shell — and what can go on paper
+        // ends in printing, after it.
+        for (name, mime, last) in [
+            ("cat.png", "image/png", "print"),
+            ("clip.mp4", "video/mp4", "terminal-at"),
+            ("song.mp3", "audio/mpeg", "terminal-at"),
+            ("paper.pdf", "application/pdf", "print"),
         ] {
             let got = names(c.openers_for(name, mime, false));
             assert_eq!(got.first().map(String::as_str), Some("delightviewer"));
-            assert_eq!(
-                got.last().map(String::as_str),
-                Some("terminal-at"),
-                "{name}"
-            );
+            assert_eq!(got.last().map(String::as_str), Some(last), "{name}");
+            if last == "print" {
+                assert_eq!(got[got.len() - 2], "terminal-at", "{name}");
+            }
+        }
+        // Printing is last for a PDF, a picture, an office document old or
+        // new, markdown and source, by the hint each one's name gives.
+        for name in [
+            "paper.pdf",
+            "cat.png",
+            "photo.jpg",
+            "letter.docx",
+            "old.doc",
+            "budget.xlsx",
+            "budget.xls",
+            "deck.pptx",
+            "deck.ppt",
+            "essay.odt",
+            "sheet.ods",
+            "slides.odp",
+            "memo.rtf",
+            "notes.md",
+            "main.rs",
+        ] {
+            let mime = crate::fs::mime::hint_for_name(name);
+            let got = names(c.openers_for(name, mime, false));
+            assert_eq!(got.last().map(String::as_str), Some("print"), "{name}");
+        }
+        // An office document no longer falls through to the fallback, and
+        // still opens in the system default first, as it did there.
+        let docx = crate::fs::mime::hint_for_name("letter.docx");
+        assert_eq!(
+            names(c.openers_for("letter.docx", docx, false)),
+            vec!["open", "terminal-at", "print"]
+        );
+        let print = c.opener("print").expect("print");
+        assert_eq!(print.builtin(), Some("print"));
+        assert_eq!(print.description, "Print…");
+        assert!(!print.block, "the dialog is waited for on a worker");
+        // Nothing that has no page to print offers it.
+        for (name, mime) in [
+            ("clip.mp4", "video/mp4"),
+            ("song.mp3", "audio/mpeg"),
+            ("benchy.gcode", "text/plain"),
+            ("bracket.obj", "text/plain"),
+            ("Inter.ttf", "font/ttf"),
+            ("backup.tar.gz", "application/gzip"),
+            ("mystery", "application/octet-stream"),
+        ] {
+            let got = names(c.openers_for(name, mime, false));
+            assert!(!got.iter().any(|n| n == "print"), "{name}: {got:?}");
         }
         // The archive rule PLAN §6 asks for, which yazi's config was missing.
         let extract = c.openers_for("backup.tar.gz", "application/gzip", false);
@@ -2374,9 +2461,14 @@ mod tests {
         for id in ["extract", "extract-here", "extract-merged"] {
             assert_eq!(c.opener(id).and_then(Opener::builtin), Some(id));
         }
-        // Directories match `*/`, whatever their mime.
+        // Directories match `*/`, whatever their mime or name, and no folder
+        // is offered to the printer.
         assert_eq!(
             names(c.openers_for("Work", "inode/directory", true)),
+            vec!["open", "zed-workspace", "terminal-here"]
+        );
+        assert_eq!(
+            names(c.openers_for("Papers.pdf", "application/pdf", true)),
             vec!["open", "zed-workspace", "terminal-here"]
         );
         // …and nothing is ever an empty picker.

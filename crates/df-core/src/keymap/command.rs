@@ -191,6 +191,12 @@ commands! {
     // The other direction: the selection packed into one new archive, its
     // format chosen by the extension typed into the prompt.
     ArchiveCreate => "archive-create",
+    // The selection, or the row under the cursor, through the desktop's own
+    // print dialog, a file at a time — what the `print` opener does from `O`.
+    // **Unbound by default**: `Ctrl+p` is the command palette and stays so,
+    // the app menu's Edit ▸ Print… and the palette are its doors, and a
+    // `keymap.toml` line puts it on a key.
+    Print => "print",
     // `C`: the permissions card over the selection, or the row under the
     // cursor — the nine bits as a grid, the octal under it, and for a
     // folder, everything inside it too (`ops::mode`).
