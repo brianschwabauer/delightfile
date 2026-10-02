@@ -59,6 +59,8 @@ mod permissions;
 mod platform;
 mod playback;
 mod preview;
+/// Printing a file: the PDF the print dialog is handed (`builtin:print`).
+mod print;
 /// Remote services browsed as directories (PLAN §7.6).
 mod remote;
 mod ripple;
