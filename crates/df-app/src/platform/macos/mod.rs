@@ -22,6 +22,7 @@ pub mod mounts;
 pub mod open;
 pub mod pdfium;
 pub mod portal;
+pub mod print;
 pub use crate::platform::unix::process;
 pub mod trash;
 pub mod window;

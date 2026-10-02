@@ -29,6 +29,7 @@ pub use crate::platform::unix::process;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").
 pub mod portal;
+pub mod print;
 pub mod svg;
 pub mod trash;
 mod wayland;

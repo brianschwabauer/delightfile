@@ -27,6 +27,7 @@ pub mod mounts;
 pub mod open;
 pub mod pdfium;
 pub mod portal;
+pub mod print;
 pub mod process;
 mod titlebar;
 pub mod trash;
