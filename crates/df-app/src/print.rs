@@ -16,11 +16,12 @@
 //!   baseline or progressive, grey or YCbCr — goes in as the file's own bytes
 //!   under `/DCTDecode`, so nothing is decoded or compressed again; anything
 //!   else is decoded, laid over white where it is see-through, and deflated.
-//!   The page is US Letter in a US locale and A4 everywhere else ([`paper_for`]),
-//!   turned on its side for a picture wider than it is tall, with half an inch
-//!   all round, and the picture is fitted into what is left, larger or
-//!   smaller — a JPEG the right way up by its EXIF orientation, which a phone
-//!   writes instead of turning the pixels.
+//!   The page is US Letter where the locale's paper is — the United States,
+//!   Canada, Mexico, the Philippines and much of Latin America — and A4
+//!   everywhere else ([`paper_for`]), turned on its side for a picture wider
+//!   than it is tall, with half an inch all round, and the picture is fitted
+//!   into what is left, larger or smaller — a JPEG the right way up by its
+//!   EXIF orientation, which a phone writes instead of turning the pixels.
 //! - **Everything else** — Word, PowerPoint and Excel, old and new,
 //!   OpenDocument, RTF, text, markdown, source, and the pictures the build
 //!   does not decode (HEIC, AVIF, TIFF, SVG) — is LibreOffice's:
@@ -108,7 +109,67 @@ impl Pdf {
 /// Where this process makes its PDFs: a folder in the system's temporary
 /// directory, named for the process, which quitting removes once it is empty.
 pub fn scratch() -> PathBuf {
-    std::env::temp_dir().join(format!("delightfile-print-{}", std::process::id()))
+    std::env::temp_dir().join(format!("{SCRATCH_PREFIX}{}", std::process::id()))
+}
+
+/// What every process's [`scratch`] folder is called, before its pid.
+const SCRATCH_PREFIX: &str = "delightfile-print-";
+
+/// How long another process's scratch folder goes untouched before it is
+/// taken for one a crash left behind: one in use gains a folder per file it
+/// prints, which touches it.
+const LEFTOVER_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Remove what crashed runs left in the temporary directory: every other
+/// process's [`scratch`] folder not touched for [`LEFTOVER_AGE`]. Once per
+/// process, at its first print rather than at startup, which has better
+/// things to do than read the temporary directory.
+pub fn sweep_leftovers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let swept = sweep_leftovers_in(&std::env::temp_dir(), &scratch(), LEFTOVER_AGE);
+        if swept > 0 {
+            log::info!("removed {swept} print folder(s) a crashed run left behind");
+        }
+    });
+}
+
+/// [`sweep_leftovers`] in `dir`, sparing `own`, for folders at least `age`
+/// old: how many went. Only a real folder named for a pid is touched — not a
+/// link, and not one somebody else named like it.
+fn sweep_leftovers_in(dir: &Path, own: &Path, age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(SCRATCH_PREFIX));
+        if !pid.is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+            || path == own
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let untouched = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|elapsed| elapsed >= age);
+        if meta.is_dir() && untouched {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => swept += 1,
+                // Another user's, in a shared /tmp: not ours to remove.
+                Err(e) => log::debug!("{}: {e}", path.display()),
+            }
+        }
+    }
+    swept
 }
 
 /// A PDF of `path`, ready for the print dialog: `path` itself when it is one,
@@ -270,6 +331,12 @@ fn office(search: &OsStr) -> Option<PathBuf> {
 /// PDF it wrote in `dir`, which it names after the file. Stopped when `ctx`
 /// is cancelled, and given up on after [`OFFICE_TIMEOUT`], with the last line
 /// it wrote to stderr in the error when it said anything.
+///
+/// With a LibreOffice already open on the desktop, `soffice` hands the
+/// conversion to that instance and only waits for it. A cancel then stops
+/// the waiting client, not the conversion; and a modal dialog in the open
+/// instance (document recovery, a macro warning) stalls the job until
+/// [`OFFICE_TIMEOUT`]'s two minutes are up.
 fn convert(program: &Path, path: &Path, dir: &Path, ctx: &TaskCtx) -> Result<PathBuf, String> {
     let name = display_name(path);
     // Beside the folder rather than in it, so the folder holds the PDF and
@@ -401,16 +468,28 @@ impl Paper {
     }
 }
 
-/// The paper a locale prints on: US Letter where the first of `LC_PAPER`,
-/// `LC_ALL` and `LANG` that is set (an empty one is not) names the United
-/// States, `en_US.UTF-8` and the like; A4, which the rest of the world uses,
-/// everywhere else.
-pub fn paper_for(lc_paper: Option<&str>, lc_all: Option<&str>, lang: Option<&str>) -> Paper {
-    let first = [lc_paper, lc_all, lang]
+/// The territories whose locales print on US Letter: those of every locale
+/// under glibc's `/usr/share/i18n/locales` whose `LC_PAPER` is 216 mm wide,
+/// by itself or by copying one that is (`en_US`), as of glibc 2.44. No
+/// territory has locales on both papers.
+const LETTER: &[&str] = &[
+    "BO", "CA", "CL", "CO", "CR", "GT", "MX", "NI", "PA", "PH", "PR", "SV", "US", "VE",
+];
+
+/// The paper a locale prints on: US Letter where the first of `LC_ALL`,
+/// `LC_PAPER` and `LANG` that is set (an empty one is not) — glibc's own
+/// order — names a territory on [`LETTER`], the part after the `_` in
+/// `en_US.UTF-8` or `es_MX@euro`; A4, which the rest of the world uses,
+/// everywhere else, `C` and `POSIX` included.
+pub fn paper_for(lc_all: Option<&str>, lc_paper: Option<&str>, lang: Option<&str>) -> Paper {
+    let first = [lc_all, lc_paper, lang]
         .into_iter()
         .flatten()
         .find(|value| !value.is_empty());
-    if first.is_some_and(|value| value.contains("_US")) {
+    let territory = first
+        .and_then(|value| value.split_once('_'))
+        .map(|(_, rest)| rest.split(['.', '@']).next().unwrap_or(rest));
+    if territory.is_some_and(|territory| LETTER.contains(&territory)) {
         Paper::Letter
     } else {
         Paper::A4
@@ -421,8 +500,8 @@ pub fn paper_for(lc_paper: Option<&str>, lc_all: Option<&str>, lang: Option<&str
 fn paper_here() -> Paper {
     let var = |name: &str| std::env::var(name).ok();
     paper_for(
-        var("LC_PAPER").as_deref(),
         var("LC_ALL").as_deref(),
+        var("LC_PAPER").as_deref(),
         var("LANG").as_deref(),
     )
 }
@@ -1270,8 +1349,9 @@ mod tests {
 
     // ── The paper ───────────────────────────────────────────────────────────
 
-    /// Letter where the first of `LC_PAPER`, `LC_ALL`, `LANG` that is set
-    /// names the United States, A4 everywhere else.
+    /// Letter where the first of `LC_ALL`, `LC_PAPER`, `LANG` that is set —
+    /// glibc's order — names a territory whose locales print on Letter, A4
+    /// everywhere else.
     #[test]
     fn the_paper_follows_the_first_locale_variable_that_is_set() {
         assert_eq!(paper_for(Some("en_US.UTF-8"), None, None), Paper::Letter);
@@ -1282,7 +1362,9 @@ mod tests {
         assert_eq!(paper_for(None, None, Some("de_DE.UTF-8")), Paper::A4);
         assert_eq!(paper_for(None, None, None), Paper::A4);
         assert_eq!(paper_for(None, None, Some("C")), Paper::A4);
-        // The first that is set decides, whatever the others say.
+        assert_eq!(paper_for(None, None, Some("C.UTF-8")), Paper::A4);
+        assert_eq!(paper_for(None, None, Some("POSIX")), Paper::A4);
+        // LC_ALL first, then LC_PAPER, whatever the others say.
         assert_eq!(
             paper_for(
                 Some("de_DE.UTF-8"),
@@ -1292,14 +1374,45 @@ mod tests {
             Paper::A4
         );
         assert_eq!(
+            paper_for(Some("en_US.UTF-8"), Some("de_DE.UTF-8"), None),
+            Paper::Letter
+        );
+        assert_eq!(
             paper_for(None, Some("en_US.UTF-8"), Some("fr_FR.UTF-8")),
             Paper::Letter
+        );
+        assert_eq!(
+            paper_for(None, Some("fr_FR.UTF-8"), Some("en_US.UTF-8")),
+            Paper::A4
         );
         // An empty one is not set.
         assert_eq!(
             paper_for(Some(""), None, Some("en_US.UTF-8")),
             Paper::Letter
         );
+        // Letter is not only the United States: glibc's own list, by the
+        // territory after the `_`, before any codeset or modifier.
+        for letter in [
+            "en_CA.UTF-8",
+            "fr_CA.UTF-8",
+            "es_MX.UTF-8",
+            "en_PH",
+            "fil_PH.UTF-8",
+            "es_PR",
+            "es_CO.UTF-8",
+            "es_CL@euro",
+            "es_VE",
+            "es_GT",
+        ] {
+            assert_eq!(
+                paper_for(None, None, Some(letter)),
+                Paper::Letter,
+                "{letter}"
+            );
+        }
+        for a4 in ["es_ES.UTF-8", "pt_BR.UTF-8", "es_AR", "en_AU", "fr_FR@euro"] {
+            assert_eq!(paper_for(None, None, Some(a4)), Paper::A4, "{a4}");
+        }
         assert_eq!(Paper::Letter.size(), (612.0, 792.0));
         assert_eq!(Paper::A4.size(), (595.276, 841.89));
     }
@@ -1345,6 +1458,35 @@ mod tests {
         pdf.discard();
         assert!(!made.exists() && !dir.exists());
         assert!(path.exists());
+    }
+
+    /// A crashed run's scratch folder is swept, with what it held, once it is
+    /// old enough; this process's own, younger ones, a folder only named
+    /// like one, a link, and anything else in the directory stay.
+    #[test]
+    fn a_crashed_runs_scratch_folder_is_swept_once_it_is_old() {
+        let tree = TempTree::new("print-sweep");
+        let crashed = tree.dir("delightfile-print-111");
+        tree.file("delightfile-print-111/7/notes.pdf", A_PDF);
+        let own = tree.dir("delightfile-print-222");
+        let named_like = tree.dir("delightfile-print-notes");
+        let unrelated = tree.dir("something-else");
+        #[cfg(unix)]
+        let link = tree.symlink(&unrelated, "delightfile-print-333");
+
+        // Fresh, so none of it is a day old.
+        assert_eq!(sweep_leftovers_in(tree.path(), &own, LEFTOVER_AGE), 0);
+        assert!(crashed.exists());
+
+        // Any age is old enough here: the crashed run's folder goes.
+        assert_eq!(sweep_leftovers_in(tree.path(), &own, Duration::ZERO), 1);
+        assert!(!crashed.exists());
+        assert!(own.exists() && named_like.exists() && unrelated.exists());
+        #[cfg(unix)]
+        assert!(
+            link.symlink_metadata().is_ok(),
+            "a link is neither followed nor removed"
+        );
     }
 
     /// Without LibreOffice, a file only it could print says so — and so does

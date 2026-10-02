@@ -1273,9 +1273,12 @@ enum PrintSource {
 /// ([`crate::print::print_one`]), downloaded first when it is remote — into
 /// a folder of its own under the print scratch folder, under the name it has
 /// on the server, so the dialog, the PDF and any error are named as it is —
-/// and the download removed once it has printed.
+/// and the download removed once it has printed. The first of a session
+/// sweeps away the scratch folders crashed sessions left
+/// ([`crate::print::sweep_leftovers`]).
 fn print_file(source: PrintSource, ctx: &TaskCtx) -> crate::print::Printed {
     use crate::print::Printed;
+    crate::print::sweep_leftovers();
     let scratch = crate::print::scratch();
     let (file, fetched) = match source {
         PrintSource::Local(file) => (file, None),
@@ -5379,14 +5382,20 @@ impl App {
 
     /// The print run's file `id` is over: the next file's turn, or the end
     /// of the run — and when it ended `cancelled`, the end whatever was left,
-    /// said once.
+    /// said once: "Print cancelled" when it was the only file, "Printing
+    /// stopped" when files after it are dropped with it.
     fn print_turn_over(&mut self, id: TaskId, cancelled: bool, now: Instant) {
         if self.printing.as_ref().is_none_or(|run| run.id != id) {
             return;
         }
         if cancelled {
-            self.printing = None;
-            self.toasts.notice("Printing stopped", now);
+            let alone = self.printing.take().is_some_and(|run| run.rest.is_empty());
+            let said = if alone {
+                "Print cancelled"
+            } else {
+                "Printing stopped"
+            };
+            self.toasts.notice(said, now);
             return;
         }
         let next = self.printing.as_mut().and_then(|run| run.rest.pop_front());

@@ -153,8 +153,9 @@ fn folders_among_files_are_skipped_and_files_queue_behind_a_run() {
 }
 
 /// A file's job ending cancelled — its dialog was, or its task — ends the
-/// run with what was waiting, said once; one ending for another task is
-/// none of the run's business; and the last file's end is the run's.
+/// run with what was waiting, said once ("Printing stopped", or "Print
+/// cancelled" for a file alone); one ending for another task is none of the
+/// run's business; and the last file's end is the run's.
 #[test]
 fn a_cancelled_turn_stops_the_run() {
     let mut app = Fixture::new("print-stopped", &["a.txt"]);
@@ -178,6 +179,13 @@ fn a_cancelled_turn_stops_the_run() {
         app.remote_ops.is_empty(),
         "and nothing was started for them"
     );
+
+    // A file alone, its dialog cancelled: that print, and nothing more.
+    let id = stand_in_run(&mut app);
+    app.toasts.clear();
+    app.print_turn_over(id, true, now);
+    assert!(app.printing.is_none());
+    assert_eq!(toast_text(&app), Some("Print cancelled"));
 
     // The last file done: the run is over, quietly.
     let id = stand_in_run(&mut app);
