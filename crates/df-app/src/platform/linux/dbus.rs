@@ -37,6 +37,26 @@
 //! is the answer. So this file carries a real (small) unmarshaller: [`Value`]
 //! and [`Reader::value`], which read *any* signature udisks2 can produce.
 //!
+//! ## File descriptors
+//!
+//! The print portal ([`super::print`]) takes the PDF it prints as an open
+//! file, not a path: an `h` argument, which on the wire is only an index
+//! ([`Value::UnixFd`]) into descriptors that travel beside the message's bytes
+//! as `SCM_RIGHTS` ancillary data, with the header's `UNIX_FDS` field saying
+//! how many there are. Three things make that work, and a connection gets
+//! them only when it asks ([`Bus::session_passing_fds`]): the handshake's
+//! `NEGOTIATE_UNIX_FD` after the bus's `OK`, which the bus must `AGREE` to
+//! before `BEGIN`; the count in the header; and the whole message going out in
+//! one `sendmsg` with the descriptors attached ([`Bus::send_with_fds`]), so
+//! they arrive with its first byte. Every other connection here is left as it
+//! was, because a bus routes a message carrying descriptors only to a
+//! connection that said it could take them.
+//!
+//! Descriptors only go *out*. Nothing this program calls answers with one, so
+//! the reading side stays a plain `read`; the kernel closes whatever
+//! descriptors a peer might send along, rather than leaving them open in this
+//! process.
+//!
 //! ## Everything here blocks
 //!
 //! A mount can take seconds (fsck, network, a spinning disk waking up) and a
@@ -52,6 +72,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -106,6 +127,8 @@ const F_REPLY_SERIAL: u8 = 5;
 const F_DESTINATION: u8 = 6;
 const F_SENDER: u8 = 7;
 const F_SIGNATURE: u8 = 8;
+/// How many file descriptors ride along with the message (`u`).
+const F_UNIX_FDS: u8 = 9;
 
 /// Where the system bus lives when the environment does not say.
 ///
@@ -173,6 +196,12 @@ pub enum Value {
     /// type from. The accessors look through it, so a reader of a property
     /// never has to care.
     Variant(String, Box<Value>),
+    /// `h`: which of the message's file descriptors, as an index into the
+    /// ones that travel beside its bytes ([`Bus::send_with_fds`]). A `u` on
+    /// the wire, and kept apart from [`Value::U32`] for the reason
+    /// [`Value::Path`] is kept apart from a string: a count sent where a
+    /// descriptor was meant is refused rather than sent.
+    UnixFd(u32),
 }
 
 impl Value {
@@ -291,6 +320,11 @@ pub struct Message {
     pub sender: Option<String>,
     /// The body's signature. `None` is an empty body.
     pub signature: Option<String>,
+    /// How many file descriptors travel with this message (`UNIX_FDS`).
+    /// Stamped by [`Bus::send_with_fds`], which sends them; on a message
+    /// read off the wire it is only the count, since nothing here takes the
+    /// descriptors themselves in.
+    pub unix_fds: Option<u32>,
     pub body: Vec<u8>,
 }
 
@@ -415,6 +449,9 @@ impl Message {
         if let Some(sig) = &self.signature {
             field(F_SIGNATURE, "g", Value::Signature(sig.clone()));
         }
+        if let Some(count) = self.unix_fds {
+            field(F_UNIX_FDS, "u", Value::U32(count));
+        }
         let header = Value::Struct(vec![
             Value::U8(LE),
             Value::U8(self.kind),
@@ -486,6 +523,12 @@ pub struct Bus {
     /// Read past like a stray signal, it was lost, and the first file dialog
     /// after every login waited out its timeout.
     backlog: std::collections::VecDeque<Message>,
+    /// The name the bus gave this connection in answer to `Hello` (`:1.42`),
+    /// which a portal builds its request paths from.
+    unique_name: Option<String>,
+    /// Whether the bus agreed to pass file descriptors on this connection
+    /// ([`Bus::session_passing_fds`]).
+    fds: bool,
 }
 
 impl Bus {
@@ -493,24 +536,48 @@ impl Bus {
     pub fn system() -> Result<Bus, String> {
         let address = std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
             .unwrap_or_else(|_| format!("unix:path={SYSTEM_BUS}"));
-        Bus::open(&address, "the system bus")
+        Bus::open(&address, "the system bus", false)
     }
 
     /// Connect to the session bus, authenticate, and say Hello.
     pub fn session() -> Result<Bus, String> {
-        Bus::open(&session_address()?, "the session bus")
+        Bus::open(&session_address()?, "the session bus", false)
     }
 
-    fn open(address: &str, name: &'static str) -> Result<Bus, String> {
+    /// [`Bus::session`], with file descriptor passing negotiated in the
+    /// handshake: the connection a call that hands over an open file has to
+    /// be made on ([`Bus::send_with_fds`]). A bus that will not pass them is
+    /// an error here, before anything is asked of anybody.
+    pub fn session_passing_fds() -> Result<Bus, String> {
+        Bus::open(&session_address()?, "the session bus", true)
+    }
+
+    fn open(address: &str, name: &'static str, fds: bool) -> Result<Bus, String> {
         let socket = bus_socket(address)?;
         let sock = socket
             .connect()
             .map_err(|e| format!("connecting to {name} at {socket:?}: {e}"))?;
         let mut bus = Bus::on_socket(sock);
         bus.name = name;
-        bus.authenticate()?;
+        bus.authenticate(fds)?;
         bus.hello()?;
         Ok(bus)
+    }
+
+    /// This connection's unique name (`:1.42`), once `Hello` has answered.
+    pub fn unique_name(&self) -> Option<&str> {
+        self.unique_name.as_deref()
+    }
+
+    /// A connection over a socket pair as [`Bus::session_passing_fds`]
+    /// leaves one: named, and passing descriptors. What a test drives a
+    /// portal client through, with a make-believe bus on the other end.
+    #[cfg(test)]
+    pub fn negotiated(sock: UnixStream, unique_name: &str) -> Bus {
+        let mut bus = Bus::on_socket(sock);
+        bus.unique_name = Some(unique_name.to_string());
+        bus.fds = true;
+        bus
     }
 
     /// A client over an already-connected socket — the seam the tests use, and
@@ -530,6 +597,8 @@ impl Bus {
             timeout: CALL_TIMEOUT,
             name: "the bus",
             backlog: std::collections::VecDeque::new(),
+            unique_name: None,
+            fds: false,
         }
     }
 
@@ -610,7 +679,13 @@ impl Bus {
 
     /// SASL EXTERNAL: the kernel already told the bus who we are, so the whole
     /// handshake is "here is my uid in hex" and a `BEGIN`.
-    fn authenticate(&mut self) -> Result<(), String> {
+    ///
+    /// With `fds`, one exchange between the two: `NEGOTIATE_UNIX_FD` once the
+    /// bus has said `OK`, which it answers `AGREE_UNIX_FD` or `ERROR`. Only in
+    /// that window — the specification allows it nowhere else — and only on a
+    /// connection that will send a descriptor, since the others never need
+    /// the bus to have agreed.
+    fn authenticate(&mut self, fds: bool) -> Result<(), String> {
         let hex = auth_line(uid());
         self.sock
             .write_all(hex.as_bytes())
@@ -618,6 +693,14 @@ impl Bus {
         let line = self.read_line()?;
         if !line.starts_with("OK") {
             return Err(format!("{} refused EXTERNAL auth: {line}", self.name));
+        }
+        if fds {
+            self.sock
+                .write_all(b"NEGOTIATE_UNIX_FD\r\n")
+                .map_err(|e| format!("bus auth: {e}"))?;
+            let answer = self.read_line()?;
+            fd_agreement(&answer).map_err(|e| format!("{} {e}", self.name))?;
+            self.fds = true;
         }
         self.sock
             .write_all(b"BEGIN\r\n")
@@ -699,17 +782,93 @@ impl Bus {
         format!("{} did not answer within {:?}", self.name, self.timeout)
     }
 
-    /// `org.freedesktop.DBus.Hello` — mandatory first call.
+    /// `org.freedesktop.DBus.Hello` — mandatory first call — and the unique
+    /// name it answers with, kept for [`Bus::unique_name`].
     fn hello(&mut self) -> Result<(), String> {
-        self.call(
+        let reply = self.call(
             "org.freedesktop.DBus",
             "/org/freedesktop/DBus",
             "org.freedesktop.DBus",
             "Hello",
             None,
             &[],
-        )
-        .map(|_| ())
+        )?;
+        self.unique_name = Reader::new(&reply)
+            .string()
+            .ok()
+            .filter(|name| !name.is_empty());
+        Ok(())
+    }
+
+    /// Stamp `msg` with the next serial and send it, without waiting for
+    /// anything: for a caller that reads what comes back itself
+    /// ([`Bus::next`]), because what comes back is more than a reply.
+    pub fn send(&mut self, mut msg: Message) -> Result<u32, String> {
+        self.serial = next_serial(self.serial);
+        msg.serial = self.serial;
+        self.sock
+            .write_all(&msg.encode()?)
+            .map_err(|e| format!("writing to {}: {e}", self.name))?;
+        Ok(self.serial)
+    }
+
+    /// [`Bus::send`], with `fds` travelling beside the message: its `h`
+    /// arguments are indexes into this list ([`Value::UnixFd`]), and the
+    /// header says how long it is.
+    ///
+    /// Refused on a connection that did not negotiate descriptor passing,
+    /// which the bus would refuse in its turn. The descriptors are the
+    /// caller's still: the receiving process gets its own copies.
+    pub fn send_with_fds(
+        &mut self,
+        mut msg: Message,
+        fds: &[BorrowedFd<'_>],
+    ) -> Result<u32, String> {
+        if fds.is_empty() {
+            return self.send(msg);
+        }
+        if !self.fds {
+            return Err(format!(
+                "{} was not asked to pass file descriptors on this connection",
+                self.name
+            ));
+        }
+        let count =
+            u32::try_from(fds.len()).map_err(|_| "too many file descriptors".to_string())?;
+        self.serial = next_serial(self.serial);
+        msg.serial = self.serial;
+        msg.unix_fds = Some(count);
+        send_with_rights(&self.sock, &msg.encode()?, fds)
+            .map_err(|e| format!("writing to {}: {e}", self.name))?;
+        Ok(self.serial)
+    }
+
+    /// The next message, however long it takes to come: first any call that
+    /// arrived during a [`Bus::call`], then the socket.
+    ///
+    /// **No deadline**, unlike every other read here. It is for a wait that is
+    /// a person's — a print dialog left open while they find their glasses —
+    /// which [`CALL_TIMEOUT`] would cut short; it ends when a message comes or
+    /// the connection does. A message that frames but does not parse is
+    /// stepped over, as [`Inbox::next`] steps over one.
+    pub fn next(&mut self) -> Result<Message, String> {
+        if let Some(msg) = self.backlog.pop_front() {
+            return Ok(msg);
+        }
+        // A `Bus::call` made afterwards sets its own timeout before each read
+        // (`deadline_read`), so lifting the socket's here costs it nothing.
+        self.sock.set_read_timeout(None).ok();
+        loop {
+            fill_waiting(&mut self.sock, &mut self.buf, 16, self.name)?;
+            let total = frame_len(&self.buf)?;
+            fill_waiting(&mut self.sock, &mut self.buf, total, self.name)?;
+            let parsed = parse_message(&self.buf[..total]);
+            self.buf.drain(..total);
+            match parsed {
+                Ok(msg) => return Ok(msg),
+                Err(e) => log::warn!("skipping a message from {}: {e}", self.name),
+            }
+        }
     }
 
     /// Make one method call and block until its reply comes back.
@@ -818,17 +977,11 @@ impl Bus {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u32, String> {
-        self.serial = next_serial(self.serial);
-        let msg = Message {
-            serial: self.serial,
+        self.send(Message {
             signature: signature.map(str::to_string),
             body: body.to_vec(),
             ..Message::method_call(destination, path, interface, member)
-        };
-        self.sock
-            .write_all(&msg.encode()?)
-            .map_err(|e| format!("writing to {}: {e}", self.name))?;
-        Ok(self.serial)
+        })
     }
 
     /// Hold on to a method call that arrived mid-call; drop anything else.
@@ -893,9 +1046,9 @@ impl Inbox {
             return Ok(msg);
         }
         loop {
-            self.fill(16)?;
+            fill_waiting(&mut self.sock, &mut self.buf, 16, self.name)?;
             let total = frame_len(&self.buf)?;
-            self.fill(total)?;
+            fill_waiting(&mut self.sock, &mut self.buf, total, self.name)?;
             let parsed = parse_message(&self.buf[..total]);
             self.buf.drain(..total);
             match parsed {
@@ -904,22 +1057,93 @@ impl Inbox {
             }
         }
     }
+}
 
-    fn fill(&mut self, want: usize) -> Result<(), String> {
-        let mut chunk = [0u8; 8192];
-        while self.buf.len() < want {
-            let n = match self.sock.read(&mut chunk) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(format!("reading from {}: {e}", self.name)),
-            };
-            if n == 0 {
-                return Err(format!("{} closed the connection", self.name));
-            }
-            self.buf.extend_from_slice(&chunk[..n]);
+/// Read from `sock` into `buf` until it holds `want` bytes, however long that
+/// takes: the waits with no deadline, [`Inbox::next`] and [`Bus::next`].
+fn fill_waiting(
+    sock: &mut UnixStream,
+    buf: &mut Vec<u8>,
+    want: usize,
+    name: &str,
+) -> Result<(), String> {
+    let mut chunk = [0u8; 8192];
+    while buf.len() < want {
+        let n = match sock.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("reading from {name}: {e}")),
+        };
+        if n == 0 {
+            return Err(format!("{name} closed the connection"));
         }
-        Ok(())
+        buf.extend_from_slice(&chunk[..n]);
     }
+    Ok(())
+}
+
+/// Write `bytes` to `sock` with `fds` attached as `SCM_RIGHTS`, in one
+/// `sendmsg`, so the descriptors arrive with the message's first byte — which
+/// is where the bus looks for them.
+///
+/// A stream socket may take less than all of it. The descriptors went with
+/// whatever part it took, and the rest is plain bytes, written after.
+///
+/// The one `unsafe` in this file outside its tests: `sendmsg` and the
+/// `CMSG_*` arithmetic that lays out its control buffer have no safe spelling
+/// on stable Rust (std's `SocketAncillary` is unstable). Every pointer handed
+/// to the kernel is to a local that outlives the call, and the kernel only
+/// reads through them.
+#[allow(unsafe_code)]
+fn send_with_rights(
+    sock: &UnixStream,
+    bytes: &[u8],
+    fds: &[BorrowedFd<'_>],
+) -> std::io::Result<()> {
+    let raw: Vec<libc::c_int> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+    let data_len = std::mem::size_of_val(raw.as_slice());
+    let data_len_c = libc::c_uint::try_from(data_len)
+        .map_err(|_| std::io::Error::other("too many file descriptors"))?;
+    // SAFETY: arithmetic on its argument; nothing is dereferenced.
+    let space = unsafe { libc::CMSG_SPACE(data_len_c) } as usize;
+    // Whole u64s, so the buffer has the alignment a `cmsghdr` needs.
+    let mut control = vec![0u64; space.div_ceil(8)];
+    let mut iov = libc::iovec {
+        iov_base: bytes.as_ptr().cast_mut().cast(),
+        iov_len: bytes.len(),
+    };
+    // SAFETY: all-zero is a valid `msghdr` — null pointers, zero lengths, and
+    // whatever padding fields the C library adds.
+    let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
+    header.msg_iov = &mut iov;
+    header.msg_iovlen = 1;
+    header.msg_control = control.as_mut_ptr().cast();
+    header.msg_controllen = space as _;
+    // SAFETY: `msg_control` points at `space` bytes, which by `CMSG_SPACE`'s
+    // definition hold one header and `data_len` bytes of data, so the first
+    // header is there (not null) and its data has room for every descriptor.
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&header);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(data_len_c) as _;
+        std::ptr::copy_nonoverlapping(raw.as_ptr().cast::<u8>(), libc::CMSG_DATA(cmsg), data_len);
+    }
+    let sent = loop {
+        // SAFETY: `header`, `iov`, `bytes` and `control` are all alive and
+        // unmoved for the call. `MSG_NOSIGNAL`: a bus that has hung up is an
+        // error here, not a SIGPIPE.
+        let n = unsafe { libc::sendmsg(sock.as_raw_fd(), &header, libc::MSG_NOSIGNAL) };
+        if let Ok(n) = usize::try_from(n) {
+            break n;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    };
+    let mut rest = sock;
+    rest.write_all(&bytes[sent..])
 }
 
 /// The writing half of a service's connection, shared behind a lock by every
@@ -1012,6 +1236,23 @@ pub fn auth_line(uid: u32) -> String {
         .collect();
     // The leading NUL is part of the protocol, not part of the line.
     format!("\0AUTH EXTERNAL {hex}\r\n")
+}
+
+/// The bus's answer to `NEGOTIATE_UNIX_FD`, read: `AGREE_UNIX_FD` is yes,
+/// and anything else — `ERROR` with or without a reason, which is how a bus
+/// that cannot pass descriptors says so — is no, in a sentence that finishes
+/// "the session bus …".
+pub fn fd_agreement(line: &str) -> Result<(), String> {
+    if line == "AGREE_UNIX_FD" {
+        return Ok(());
+    }
+    match line.strip_prefix("ERROR") {
+        Some(why) if !why.trim().is_empty() => {
+            Err(format!("will not pass file descriptors: {}", why.trim()))
+        }
+        Some(_) => Err("will not pass file descriptors".to_string()),
+        None => Err(format!("answered NEGOTIATE_UNIX_FD with `{line}`")),
+    }
 }
 
 /// The process uid, without `libc` and without `unsafe`: `/proc/self` is owned
@@ -1178,6 +1419,7 @@ fn parse_header_fields(bytes: &[u8], msg: &mut Message) -> Result<(), String> {
             (F_REPLY_SERIAL, "u") => msg.reply_serial = Some(r.u32()?),
             (F_DESTINATION, "s") => msg.destination = Some(r.string()?),
             (F_SIGNATURE, "g") => msg.signature = Some(r.signature()?).filter(|s| !s.is_empty()),
+            (F_UNIX_FDS, "u") => msg.unix_fds = Some(r.u32()?),
             // Everything else is read past rather than understood — a field
             // this code does not use must not fail a message it could parse.
             (_, sig) => r.skip(sig)?,
@@ -1300,7 +1542,8 @@ fn marshal_at(out: &mut Vec<u8>, sig: &str, value: &Value, depth: u32) -> Result
         (Some(b'n'), Value::I16(n)) => put_aligned(out, &n.to_le_bytes()),
         (Some(b'q'), Value::U16(n)) => put_aligned(out, &n.to_le_bytes()),
         (Some(b'i'), Value::I32(n)) => put_aligned(out, &n.to_le_bytes()),
-        (Some(b'u' | b'h'), Value::U32(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'u'), Value::U32(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'h'), Value::UnixFd(n)) => put_aligned(out, &n.to_le_bytes()),
         (Some(b'x'), Value::I64(n)) => put_aligned(out, &n.to_le_bytes()),
         (Some(b't'), Value::U64(n)) => put_aligned(out, &n.to_le_bytes()),
         (Some(b'd'), Value::F64(f)) => put_aligned(out, &f.to_bits().to_le_bytes()),
@@ -1419,6 +1662,7 @@ fn kind_of(value: &Value) -> &'static str {
         Value::Dict(_) => "a dictionary",
         Value::Struct(_) => "a struct",
         Value::Variant(..) => "a variant",
+        Value::UnixFd(_) => "a file descriptor's index",
     }
 }
 
@@ -1655,7 +1899,7 @@ impl<'a> Reader<'a> {
             's' => Ok(Value::Str(self.string()?)),
             'o' => Ok(Value::Path(self.string()?)),
             'g' => Ok(Value::Signature(self.signature()?)),
-            'h' => Ok(Value::U32(self.u32()?)),
+            'h' => Ok(Value::UnixFd(self.u32()?)),
             'v' => {
                 let inner = self.signature()?;
                 if split_types(&inner).len() != 1 {
@@ -2418,7 +2662,7 @@ mod tests {
             }
         });
         let start = std::time::Instant::now();
-        let err = bus.authenticate().unwrap_err();
+        let err = bus.authenticate(false).unwrap_err();
         assert!(err.contains("did not answer"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(5));
         drop(bus);
@@ -3115,5 +3359,355 @@ mod generic {
         drop(peer);
         drop(outbox);
         assert!(inbox.next().is_err());
+    }
+}
+
+/// The receiving end of [`Bus::send_with_fds`], for tests: one whole message
+/// off `sock`, and the descriptors that came with it, taken in the way a bus
+/// takes them. `None` once the other end has hung up.
+///
+/// The header's sixteen bytes are read with `recvmsg`, since the descriptors
+/// arrive with a message's first byte, and the rest with plain reads of
+/// exactly its length — so a message after it is never touched.
+#[cfg(test)]
+#[allow(unsafe_code)] // recvmsg and the CMSG_* walk over its control buffer, into locals this function owns
+pub fn receive_with_fds(sock: &mut UnixStream) -> Option<(Message, Vec<std::os::fd::OwnedFd>)> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut head = [0u8; 16];
+    // Room for far more descriptors than any test sends.
+    let mut control = [0u64; 64];
+    let mut iov = libc::iovec {
+        iov_base: head.as_mut_ptr().cast(),
+        iov_len: head.len(),
+    };
+    // SAFETY: all-zero is a valid `msghdr`.
+    let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
+    header.msg_iov = &mut iov;
+    header.msg_iovlen = 1;
+    header.msg_control = control.as_mut_ptr().cast();
+    header.msg_controllen = std::mem::size_of_val(&control) as _;
+    // SAFETY: every pointer in `header` is to a local alive for the call.
+    let n = unsafe { libc::recvmsg(sock.as_raw_fd(), &mut header, libc::MSG_CMSG_CLOEXEC) };
+    let n = usize::try_from(n).ok().filter(|&n| n > 0)?;
+    let mut fds = Vec::new();
+    // SAFETY: the walk is the kernel's own layout of `control`, bounded by
+    // the length it wrote back into `header`; each descriptor it carries is
+    // new to this process and owned by nobody else.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&header);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+                let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
+                let bytes = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                for i in 0..bytes / std::mem::size_of::<libc::c_int>() {
+                    fds.push(OwnedFd::from_raw_fd(data.add(i).read_unaligned()));
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(&header, cmsg);
+        }
+    }
+    sock.read_exact(&mut head[n..]).ok()?;
+    let mut rest = vec![0u8; frame_len(&head).ok()? - 16];
+    sock.read_exact(&mut rest).ok()?;
+    let msg = parse_message(&[&head[..], &rest[..]].concat()).ok()?;
+    Some((msg, fds))
+}
+
+/// Descriptors going out: the `h` type, the `UNIX_FDS` header field, the
+/// handshake that allows them, and the `sendmsg` that carries them.
+#[cfg(test)]
+mod fds {
+    #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
+
+    use std::os::fd::AsFd;
+
+    use super::*;
+
+    fn s(text: &str) -> Value {
+        Value::Str(text.to_string())
+    }
+
+    /// The print portal's `Print`, as this program makes it.
+    fn print_call() -> Message {
+        Message {
+            serial: 9,
+            unix_fds: Some(1),
+            ..Message::method_call(
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Print",
+                "Print",
+            )
+        }
+        .with_args(
+            "ssha{sv}",
+            &[
+                s(""),
+                s("a.pdf"),
+                Value::UnixFd(0),
+                Value::Dict(vec![(s("token"), Value::variant("u", Value::U32(7)))]),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// An `h` is a `u` on the wire — the index, aligned to four — and only
+    /// [`Value::UnixFd`] is sent as one: a plain number where a descriptor
+    /// was meant is refused, and the other way round.
+    #[test]
+    fn an_fd_argument_is_an_index_on_the_wire() {
+        let body = marshal_body("sh", &[s("a"), Value::UnixFd(2)]).unwrap();
+        #[rustfmt::skip]
+        let expected = vec![
+            1, 0, 0, 0, b'a', 0,    // "a"
+            0, 0,                   // padding to the next four
+            2, 0, 0, 0,             // h: the third descriptor
+        ];
+        assert_eq!(body, expected);
+        assert_eq!(
+            Reader::new(&body).values("sh").unwrap(),
+            vec![s("a"), Value::UnixFd(2)]
+        );
+        assert!(marshal(&mut Vec::new(), "h", &Value::U32(0)).is_err());
+        assert!(marshal(&mut Vec::new(), "u", &Value::UnixFd(0)).is_err());
+    }
+
+    /// The header says how many descriptors travel with the message, as
+    /// field 9 holding a `u`, and reads back as it went.
+    #[test]
+    fn the_header_counts_the_descriptors() {
+        let call = print_call();
+        let mut fields = Vec::new();
+        push_field(&mut fields, F_PATH, 'o', "/org/freedesktop/portal/desktop");
+        push_field(
+            &mut fields,
+            F_INTERFACE,
+            's',
+            "org.freedesktop.portal.Print",
+        );
+        push_field(&mut fields, F_MEMBER, 's', "Print");
+        push_field(
+            &mut fields,
+            F_DESTINATION,
+            's',
+            "org.freedesktop.portal.Desktop",
+        );
+        push_signature_field(&mut fields, "ssha{sv}");
+        pad_to(&mut fields, 8);
+        #[rustfmt::skip]
+        fields.extend_from_slice(&[
+            9, 1, b'u', 0,          // UNIX_FDS, a variant of `u`…
+            1, 0, 0, 0,             // …saying one
+        ]);
+        let by_hand = encode_message(MSG_METHOD_CALL, 0, 9, &fields, &call.body);
+        let encoded = call.encode().unwrap();
+        assert_eq!(encoded, by_hand);
+
+        let parsed = parse_message(&encoded).unwrap();
+        assert_eq!(parsed, call);
+        assert_eq!(parsed.unix_fds, Some(1));
+        assert_eq!(parsed.args().unwrap()[2], Value::UnixFd(0));
+
+        // And a message with none has no such field at all.
+        let plain = Message {
+            unix_fds: None,
+            ..call
+        };
+        assert_eq!(
+            parse_message(&plain.encode().unwrap()).unwrap().unix_fds,
+            None
+        );
+    }
+
+    /// `AGREE_UNIX_FD` is the only yes.
+    #[test]
+    fn the_bus_agreeing_to_pass_descriptors_is_read_off_its_answer() {
+        assert_eq!(fd_agreement("AGREE_UNIX_FD"), Ok(()));
+        let no = fd_agreement("ERROR \"not supported on this transport\"").unwrap_err();
+        assert!(no.contains("will not pass file descriptors"), "{no}");
+        assert!(no.contains("not supported"), "{no}");
+        assert_eq!(
+            fd_agreement("ERROR"),
+            Err("will not pass file descriptors".to_string())
+        );
+        assert!(fd_agreement("OK 1234").is_err());
+        assert!(fd_agreement("AGREE_UNIX_FDS").is_err());
+        assert!(fd_agreement("").is_err());
+    }
+
+    /// One `\r\n` line of the handshake, as the bus reads it; what there was
+    /// of one when the line ends first.
+    fn line(peer: &mut UnixStream) -> String {
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        while !line.ends_with(b"\r\n") {
+            if peer.read(&mut byte).unwrap() == 0 {
+                return String::from_utf8_lossy(&line).into_owned();
+            }
+            line.push(byte[0]);
+        }
+        line.truncate(line.len() - 2);
+        String::from_utf8_lossy(&line).into_owned()
+    }
+
+    /// The handshake as a bus sees it: `NEGOTIATE_UNIX_FD` after `OK` and
+    /// before `BEGIN` when descriptors were asked for, never otherwise; and a
+    /// bus that will not pass them ends the connection there, with no
+    /// `BEGIN`.
+    #[test]
+    fn negotiation_comes_between_ok_and_begin() {
+        for (fds, agrees) in [(true, true), (true, false), (false, true)] {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let mut bus = Bus::on_socket(ours);
+            bus.timeout = Duration::from_secs(5);
+            let peer = std::thread::spawn(move || {
+                let mut peer = theirs;
+                let mut said = vec![line(&mut peer)];
+                peer.write_all(b"OK 0123456789abcdef0123456789abcdef\r\n")
+                    .unwrap();
+                let next = line(&mut peer);
+                let negotiating = next == "NEGOTIATE_UNIX_FD";
+                said.push(next);
+                if negotiating {
+                    let answer: &[u8] = if agrees {
+                        b"AGREE_UNIX_FD\r\n"
+                    } else {
+                        b"ERROR\r\n"
+                    };
+                    peer.write_all(answer).unwrap();
+                    said.push(line(&mut peer));
+                }
+                said
+            });
+            let result = bus.authenticate(fds);
+            let negotiated = bus.fds;
+            drop(bus);
+            let said = peer.join().unwrap();
+            assert!(said[0].starts_with("\0AUTH EXTERNAL "), "{said:?}");
+            match (fds, agrees) {
+                (true, true) => {
+                    assert_eq!(result, Ok(()));
+                    assert!(negotiated);
+                    assert_eq!(said[1..], ["NEGOTIATE_UNIX_FD", "BEGIN"]);
+                }
+                (true, false) => {
+                    let err = result.unwrap_err();
+                    assert!(err.contains("will not pass file descriptors"), "{err}");
+                    assert!(!negotiated);
+                    // The connection ended where the bus said no.
+                    assert_eq!(said[1..], ["NEGOTIATE_UNIX_FD", ""]);
+                }
+                _ => {
+                    assert_eq!(result, Ok(()));
+                    assert!(!negotiated);
+                    assert_eq!(said[1..], ["BEGIN"]);
+                }
+            }
+        }
+    }
+
+    /// `Hello`'s answer is kept: it is what a portal names its requests by.
+    #[test]
+    fn hello_names_the_connection() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_secs(5);
+        assert_eq!(bus.unique_name(), None);
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let (hello, _) = receive_with_fds(&mut peer).unwrap();
+            assert_eq!(hello.member.as_deref(), Some("Hello"));
+            let reply = Message {
+                serial: 1,
+                sender: Some(BUS_DRIVER.into()),
+                ..Message::method_return(&hello)
+            }
+            .with_args("s", &[s(":1.42")])
+            .unwrap();
+            peer.write_all(&reply.encode().unwrap()).unwrap();
+        });
+        bus.hello().unwrap();
+        peer.join().unwrap();
+        assert_eq!(bus.unique_name(), Some(":1.42"));
+    }
+
+    /// A descriptor sent beside a message arrives as a descriptor of the
+    /// same open file: what is written through the received one comes out of
+    /// the other end of the socket it was.
+    #[test]
+    fn a_descriptor_travels_beside_its_message() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::negotiated(ours, ":1.7");
+        let (passed, mut far_end) = UnixStream::pair().unwrap();
+
+        let serial = bus.send_with_fds(print_call(), &[passed.as_fd()]).unwrap();
+        let (msg, fds) = receive_with_fds(&mut theirs).unwrap();
+        assert_eq!(msg.serial, serial);
+        assert_eq!(msg.unix_fds, Some(1));
+        assert_eq!(msg.args().unwrap()[2], Value::UnixFd(0));
+        assert_eq!(fds.len(), 1);
+
+        // Sending lent ours rather than giving it away: it is closed here,
+        // and the copy the far side received still reaches the same socket.
+        drop(passed);
+        let mut received = UnixStream::from(fds.into_iter().next().unwrap());
+        received.write_all(b"through").unwrap();
+        drop(received);
+        let mut got = String::new();
+        far_end.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "through");
+
+        // No descriptors is a plain send, with no count in the header.
+        bus.send_with_fds(Message::method_call("a.b", "/", "a.b", "M"), &[])
+            .unwrap();
+        let (plain, fds) = receive_with_fds(&mut theirs).unwrap();
+        assert_eq!(plain.unix_fds, None);
+        assert!(fds.is_empty());
+    }
+
+    /// A connection that did not negotiate refuses to send a descriptor,
+    /// and nothing reaches the socket.
+    #[test]
+    fn a_descriptor_is_not_sent_where_it_was_not_negotiated() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        let (passed, _far_end) = UnixStream::pair().unwrap();
+        let err = bus
+            .send_with_fds(print_call(), &[passed.as_fd()])
+            .unwrap_err();
+        assert!(err.contains("not asked to pass file descriptors"), "{err}");
+        drop(bus);
+        let mut rest = Vec::new();
+        (&theirs).read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "nothing was written");
+    }
+
+    /// [`Bus::next`] waits as long as it takes — well past the deadline
+    /// every call here is held to — and ends when the line does.
+    #[test]
+    fn the_wait_with_no_deadline_outlasts_the_call_timeout() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_millis(20);
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            std::thread::sleep(Duration::from_millis(200));
+            let signal = Message {
+                kind: MSG_SIGNAL,
+                serial: 3,
+                sender: Some(":1.50".into()),
+                path: Some("/a".into()),
+                interface: Some("a.b".into()),
+                member: Some("Late".into()),
+                ..Message::default()
+            };
+            peer.write_all(&signal.encode().unwrap()).unwrap();
+        });
+        let msg = bus.next().unwrap();
+        assert_eq!(msg.member.as_deref(), Some("Late"));
+        peer.join().unwrap();
+        let err = bus.next().unwrap_err();
+        assert!(err.contains("closed the connection"), "{err}");
     }
 }

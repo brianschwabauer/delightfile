@@ -93,8 +93,10 @@ resvg = { version = "0.48", default-features = false, features = [
 # system library to find.
 wayland-client.workspace = true
 # Only for the Wayland thread's own plumbing — its wake pipe (`pipe2`, `poll`,
-# `read`, `write`) and the drag icon's `memfd_create` — so Linux only. The
-# local clock the linemodes read is df-core's (`platform::time`).
+# `read`, `write`) and the drag icon's `memfd_create` — and for the D-Bus
+# client's descriptor passing to the print portal (`sendmsg`, and `recvmsg` in
+# its tests, in `platform/linux/dbus.rs`), so Linux only. The local clock the
+# linemodes read is df-core's (`platform::time`).
 libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
