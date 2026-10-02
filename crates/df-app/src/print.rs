@@ -38,16 +38,18 @@
 //! makes the PDF while it is up, so the two seconds LibreOffice takes are
 //! spent while the person is still choosing a printer. Whichever finishes
 //! last, the PDF goes to the printer under the dialog's answer. A cancelled
-//! dialog stops the making; a cancelled task stops it too, and nothing is
-//! sent. Which route a file takes is settled before the dialog is put up, so
-//! a file nothing here can print says so instead of asking first.
+//! dialog stops the making; a cancelled task stops it too, closes the dialog
+//! if it is still up, and nothing is sent; and a PDF that could not be made
+//! closes the dialog, so the failure is said at once. Which route a file
+//! takes is settled before the dialog is put up, so a file nothing here can
+//! print says so instead of asking first.
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -757,11 +759,18 @@ enum Asked {
     Printed(Result<(), String>),
 }
 
-/// One file through the print dialog: `dialog(name)` put up at once on a
-/// thread of its own, titled with the file's name, its PDF made under
+/// One file through the print dialog: `dialog(name, close)` put up at once
+/// on a thread of its own, titled with the file's name, its PDF made under
 /// `scratch` meanwhile ([`pdf_for`]), and, when both are in,
 /// `send(session, pdf)` under the dialog's answer, on the dialog's thread. A
 /// made PDF is removed afterwards.
+///
+/// `close` is set to take a dialog that is still up down again: when the
+/// task is cancelled — quitting cancels every task, and the engine waits for
+/// its workers — and when the PDF could not be made, so the person is told
+/// why at once rather than after choosing a printer for nothing. Either way
+/// the turn waits for both threads, and a cancel is looked for until both
+/// are done.
 ///
 /// `dialog` and `send` are [`crate::platform::print::prepare`] and
 /// [`crate::platform::print::Session::print`]; they are parameters so the
@@ -769,7 +778,7 @@ enum Asked {
 /// session never leaves the thread that asked for it.
 pub fn print_one<S, D, P>(path: &Path, scratch: &Path, ctx: &TaskCtx, dialog: D, send: P) -> Printed
 where
-    D: FnOnce(&str) -> Result<Option<S>, String> + Send,
+    D: FnOnce(&str, &AtomicBool) -> Result<Option<S>, String> + Send,
     P: FnOnce(S, &Path) -> Result<(), String> + Send,
 {
     let title = display_name(path);
@@ -786,10 +795,14 @@ where
     // is cancelled, and this one when the task is.
     let making = TaskCtx::detached();
     let stop_making = making.flags();
+    // The dialog's own stop: set when the task is cancelled, and when the PDF
+    // could not be made.
+    let close = AtomicBool::new(false);
     let (hand, handed) = std::sync::mpsc::channel::<PathBuf>();
     std::thread::scope(|scope| {
         let stop_asked = Arc::clone(&stop_making);
-        let asking = scope.spawn(move || match dialog(title) {
+        let close = &close;
+        let asking = scope.spawn(move || match dialog(title, close) {
             // A task cancelled while the dialog was up sends nothing, whatever
             // the dialog was answered with.
             Ok(Some(session)) => match handed.recv() {
@@ -806,44 +819,62 @@ where
             }
         });
         let making = &making;
-        let maker = scope.spawn(move || pdf_for(path, scratch, making));
-        while !maker.is_finished() {
+        let mut maker = Some(scope.spawn(move || pdf_for(path, scratch, making)));
+        let mut hand = Some(hand);
+        let mut made = None;
+        // Whether the making failed on its own — not because it was called
+        // off — and the dialog was closed for it.
+        let mut failed_making = false;
+        // Until both are done: a cancel after the PDF is in still has a
+        // dialog to close, or a hand-over to stop.
+        while maker.is_some() || !asking.is_finished() {
             if ctx.is_cancelled() {
                 stop_making.cancel();
+                close.store(true, Ordering::SeqCst);
+            }
+            if let Some(finished) = maker.take_if(|maker| maker.is_finished()) {
+                let result = finished
+                    .join()
+                    .unwrap_or_else(|_| Err(format!("making a PDF of {title} panicked")));
+                // A dialog answered yes and waiting on a PDF is handed it,
+                // or told — by the hand going — that none is coming.
+                if let Some(hand) = hand.take() {
+                    if let Ok(pdf) = &result {
+                        if !ctx.is_cancelled() {
+                            let _ = hand.send(pdf.path().to_path_buf());
+                        }
+                    }
+                }
+                if result.is_err() && !making.is_cancelled() {
+                    failed_making = true;
+                    close.store(true, Ordering::SeqCst);
+                }
+                made = Some(result);
+                continue;
             }
             std::thread::sleep(POLL);
         }
-        let made = maker
-            .join()
-            .unwrap_or_else(|_| Err(format!("making a PDF of {title} panicked")));
-        if let Ok(pdf) = &made {
-            if !ctx.is_cancelled() {
-                let _ = hand.send(pdf.path().to_path_buf());
-            }
-        }
-        // A dialog answered yes and waiting on a PDF that is not coming is
-        // told so here.
-        drop(hand);
         let asked = asking
             .join()
             .unwrap_or_else(|_| Asked::Failed("the print dialog panicked".to_string()));
         let failure = match made {
-            Ok(pdf) => {
+            Some(Ok(pdf)) => {
                 pdf.discard();
                 None
             }
-            Err(e) => Some(e),
+            Some(Err(e)) => Some(e),
+            None => None,
         };
-        match asked {
-            Asked::Printed(Ok(())) => Printed::Sent,
-            Asked::Printed(Err(e)) => Printed::Failed(e),
-            Asked::Cancelled => Printed::Stopped,
+        match (asked, failure) {
+            (Asked::Printed(Ok(())), _) => Printed::Sent,
+            (Asked::Printed(Err(e)), _) => Printed::Failed(e),
             _ if ctx.is_cancelled() => Printed::Stopped,
-            Asked::Failed(e) => Printed::Failed(e),
-            Asked::NoPdf => match failure {
-                Some(e) => Printed::Failed(e),
-                None => Printed::Stopped,
-            },
+            // Closed because the PDF could not be made: that is what to say.
+            (Asked::Cancelled, Some(e)) if failed_making => Printed::Failed(e),
+            (Asked::Cancelled, _) => Printed::Stopped,
+            (Asked::Failed(e), _) => Printed::Failed(e),
+            (Asked::NoPdf, Some(e)) => Printed::Failed(e),
+            (Asked::NoPdf, None) => Printed::Stopped,
         }
     })
 }
@@ -1402,7 +1433,7 @@ mod tests {
             &report,
             &scratch,
             &TaskCtx::detached(),
-            |_| Ok(Some(())),
+            |_, _| Ok(Some(())),
             |(), pdf| {
                 *named.lock().unwrap() = pdf.file_name().map(|n| n.to_os_string());
                 Ok(())
@@ -1447,7 +1478,7 @@ mod tests {
             &path,
             &scratch,
             &TaskCtx::detached(),
-            |title| {
+            |title, _| {
                 spool.asked.lock().unwrap().push(title.to_string());
                 Ok(Some(()))
             },
@@ -1481,7 +1512,7 @@ mod tests {
             &path,
             &tree.join("scratch"),
             &TaskCtx::detached(),
-            |_| Ok(None::<()>),
+            |_, _| Ok(None::<()>),
             |(), _| {
                 *sent.lock().unwrap() = true;
                 Ok(())
@@ -1504,7 +1535,7 @@ mod tests {
             &path,
             &scratch,
             &ctx,
-            |_| Err::<Option<()>, String>("no print portal".to_string()),
+            |_, _| Err::<Option<()>, String>("no print portal".to_string()),
             |(), _| Ok(()),
         );
         assert_eq!(failed, Printed::Failed("no print portal".to_string()));
@@ -1512,7 +1543,7 @@ mod tests {
             &path,
             &scratch,
             &ctx,
-            |_| Ok(Some(())),
+            |_, _| Ok(Some(())),
             |(), _| Err("the printer is out of paper".to_string()),
         );
         assert_eq!(
@@ -1532,7 +1563,7 @@ mod tests {
             &path,
             &tree.join("scratch"),
             &TaskCtx::detached(),
-            |_| {
+            |_, _| {
                 *asked.lock().unwrap() = true;
                 Ok(Some(()))
             },
@@ -1564,7 +1595,7 @@ mod tests {
             &path,
             &scratch,
             &TaskCtx::detached(),
-            |_| Ok(None::<()>),
+            |_, _| Ok(None::<()>),
             |(), _| Ok(()),
         );
         assert_eq!(printed, Printed::Stopped);
@@ -1584,7 +1615,7 @@ mod tests {
             &path,
             &tree.join("scratch"),
             &ctx,
-            |_| {
+            |_, _| {
                 // The task is cancelled while the dialog is up, and the
                 // dialog is answered after it.
                 flags.cancel();
@@ -1597,5 +1628,85 @@ mod tests {
         );
         assert_eq!(printed, Printed::Stopped);
         assert!(!*sent.lock().unwrap());
+    }
+
+    /// A dialog that stays up until it is closed, as the portal's does —
+    /// with a deadline of its own, so a close that never comes fails the
+    /// test rather than hanging it — and whether it was closed.
+    fn stays_up(
+        closed: &Mutex<bool>,
+    ) -> impl FnOnce(&str, &AtomicBool) -> Result<Option<()>, String> + Send + '_ {
+        move |_: &str, close: &AtomicBool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !close.load(Ordering::SeqCst) {
+                if Instant::now() >= deadline {
+                    return Ok(Some(()));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            *closed.lock().unwrap() = true;
+            Ok(None)
+        }
+    }
+
+    /// A task cancelled while the dialog is up — after the PDF is in, so
+    /// only the dialog is left to wait on — closes it, and the turn ends
+    /// stopped with nothing sent. Quitting is this: every task cancelled,
+    /// then the workers waited for.
+    #[test]
+    fn a_cancelled_task_closes_a_dialog_that_is_still_up() {
+        let tree = TempTree::new("print-one-closed");
+        let path = tree.file("paper.pdf", A_PDF);
+        let ctx = TaskCtx::detached();
+        let flags = ctx.flags();
+        let closed = Mutex::new(false);
+        let sent = Mutex::new(false);
+        let start = Instant::now();
+        let printed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                flags.cancel();
+            });
+            print_one(
+                &path,
+                &tree.join("scratch"),
+                &ctx,
+                stays_up(&closed),
+                |(), _| {
+                    *sent.lock().unwrap() = true;
+                    Ok(())
+                },
+            )
+        });
+        assert_eq!(printed, Printed::Stopped);
+        assert!(*closed.lock().unwrap(), "the dialog was closed");
+        assert!(!*sent.lock().unwrap());
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "not waited out: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A PDF that could not be made closes the dialog, and the turn is that
+    /// failure — said now, not after a printer has been chosen for nothing.
+    #[test]
+    fn a_pdf_that_cannot_be_made_closes_the_dialog_and_says_why() {
+        let tree = TempTree::new("print-one-unmade");
+        // A PNG by its signature, and nothing a decoder can read after it.
+        let path = tree.file("broken.png", b"\x89PNG\r\n\x1a\n not a picture at all");
+        let closed = Mutex::new(false);
+        let printed = print_one(
+            &path,
+            &tree.join("scratch"),
+            &TaskCtx::detached(),
+            stays_up(&closed),
+            |(), _| Ok(()),
+        );
+        let Printed::Failed(why) = printed else {
+            panic!("{printed:?}");
+        };
+        assert!(why.starts_with("broken.png"), "{why}");
+        assert!(*closed.lock().unwrap(), "the dialog was closed");
     }
 }

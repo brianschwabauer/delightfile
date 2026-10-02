@@ -145,6 +145,10 @@ pub const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
 /// one failure the user cannot understand.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// The longest [`Bus::next_unless`] waits on the socket before it asks again
+/// whether to give up: how late a stop can be noticed.
+pub const GIVE_UP_EVERY: Duration = Duration::from_millis(100);
+
 /// The largest message this client will accept.
 pub const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 
@@ -867,6 +871,54 @@ impl Bus {
             match parsed {
                 Ok(msg) => return Ok(msg),
                 Err(e) => log::warn!("skipping a message from {}: {e}", self.name),
+            }
+        }
+    }
+
+    /// [`Bus::next`] that can be called off: the next message, or `None` once
+    /// `give_up` says so.
+    ///
+    /// `give_up` is asked before each wait on the socket, and a wait lasts
+    /// [`GIVE_UP_EVERY`] at most, so a stop is noticed within a tenth of a
+    /// second; nothing else bounds the wait. It is never asked while a whole
+    /// message is already in hand: what has arrived is handed over before the
+    /// reason to stop is looked at.
+    pub fn next_unless(
+        &mut self,
+        mut give_up: impl FnMut() -> bool,
+    ) -> Result<Option<Message>, String> {
+        if let Some(msg) = self.backlog.pop_front() {
+            return Ok(Some(msg));
+        }
+        let mut chunk = [0u8; 8192];
+        loop {
+            while self.buf.len() >= 16 {
+                let total = frame_len(&self.buf)?;
+                if self.buf.len() < total {
+                    break;
+                }
+                let parsed = parse_message(&self.buf[..total]);
+                self.buf.drain(..total);
+                match parsed {
+                    Ok(msg) => return Ok(Some(msg)),
+                    Err(e) => log::warn!("skipping a message from {}: {e}", self.name),
+                }
+            }
+            if give_up() {
+                return Ok(None);
+            }
+            self.sock.set_read_timeout(Some(GIVE_UP_EVERY)).ok();
+            match self.sock.read(&mut chunk) {
+                Ok(0) => return Err(format!("{} closed the connection", self.name)),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(format!("reading from {}: {e}", self.name)),
             }
         }
     }
@@ -3709,5 +3761,71 @@ mod fds {
         peer.join().unwrap();
         let err = bus.next().unwrap_err();
         assert!(err.contains("closed the connection"), "{err}");
+    }
+
+    /// A signal named `member`, as a peer would send it.
+    fn signal(member: &str) -> Vec<u8> {
+        Message {
+            kind: MSG_SIGNAL,
+            serial: 3,
+            sender: Some(":1.50".into()),
+            path: Some("/a".into()),
+            interface: Some("a.b".into()),
+            member: Some(member.into()),
+            ..Message::default()
+        }
+        .encode()
+        .unwrap()
+    }
+
+    /// [`Bus::next_unless`] gives up when it is told to, within a wait of
+    /// the socket, with nothing having come; hands over what does come; and
+    /// ends with the line.
+    #[test]
+    fn a_wait_that_can_be_called_off_is() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(150));
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let got = bus
+                .next_unless(|| stop.load(std::sync::atomic::Ordering::SeqCst))
+                .unwrap();
+            assert!(got.is_none(), "called off: {got:?}");
+        });
+        assert!(
+            start.elapsed() < Duration::from_millis(150) + 3 * GIVE_UP_EVERY,
+            "noticed within a wait or so: {:?}",
+            start.elapsed()
+        );
+
+        theirs.write_all(&signal("Came")).unwrap();
+        let got = bus.next_unless(|| false).unwrap().unwrap();
+        assert_eq!(got.member.as_deref(), Some("Came"));
+
+        drop(theirs);
+        let err = bus.next_unless(|| false).unwrap_err();
+        assert!(err.contains("closed the connection"), "{err}");
+    }
+
+    /// A whole message already read is handed over even when the wait is
+    /// being called off: what arrived with the reason to stop still counts.
+    #[test]
+    fn a_message_in_hand_wins_over_giving_up() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        // Two in one write, so the first read takes both.
+        theirs
+            .write_all(&[signal("First"), signal("Second")].concat())
+            .unwrap();
+        let first = bus.next_unless(|| false).unwrap().unwrap();
+        assert_eq!(first.member.as_deref(), Some("First"));
+        let second = bus.next_unless(|| true).unwrap();
+        assert_eq!(second.and_then(|msg| msg.member).as_deref(), Some("Second"));
+        assert!(bus.next_unless(|| true).unwrap().is_none());
     }
 }

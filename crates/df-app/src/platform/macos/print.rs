@@ -14,9 +14,13 @@ pub struct Session {
     _never: (),
 }
 
-/// The system's print dialog: not available here.
-pub fn prepare(title: &str) -> Result<Option<Session>, String> {
-    let _ = title;
+/// The system's print dialog: not available here. `stop` is the caller's
+/// way of closing a dialog that is up, which a body here will have to honour.
+pub fn prepare(
+    title: &str,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Option<Session>, String> {
+    let _ = (title, stop);
     Err("Printing is not available on this platform".to_string())
 }
 

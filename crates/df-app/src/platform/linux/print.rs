@@ -24,11 +24,24 @@
 //! ## No deadline
 //!
 //! A person may leave the dialog open as long as they like, so the wait for
-//! the `Response` is [`Bus::next`], which has no deadline, and not
-//! [`Bus::call`], which gives up after ninety seconds. Four things end it: the
-//! `Response`; an error answering the call, from the portal or from the bus
-//! itself; the bus hanging up; and the portal's name losing the owner the call
-//! was made to, since a portal that has gone will not answer.
+//! the `Response` has no deadline, and is not [`Bus::call`], which gives up
+//! after ninety seconds. Four things end it: the `Response`; an error
+//! answering the call, from the portal or from the bus itself; the bus hanging
+//! up; and the portal's name losing the owner the call was made to, since a
+//! portal that has gone will not answer.
+//!
+//! ## Closing it from this side
+//!
+//! A fifth ends `prepare`'s wait: its `stop` flag, which the caller sets when
+//! the task is cancelled or the PDF could not be made, so that quitting does
+//! not wait on a dialog and a file that cannot print does not ask for a
+//! printer first. The wait is [`Bus::next_unless`], which looks at the flag
+//! every tenth of a second. Set, it sends `Request.Close` on the request's
+//! path — on the same connection, since the portal takes a `Close` only from
+//! the request's own sender — and the dialog goes. The answer is then `None`
+//! once `Close` has been answered, or after [`CLOSE_GRACE`] when nothing comes;
+//! unless the `Response` comes first, which wins: a dialog confirmed in the
+//! same instant is confirmed, and the caller decides what that is worth.
 //!
 //! ## One connection for both halves
 //!
@@ -55,7 +68,8 @@
 
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::platform::linux::appearance::{owner_rule, PORTAL, PORTAL_PATH};
 use crate::platform::linux::dbus::{
@@ -80,6 +94,10 @@ const REQUESTS: &str = "/org/freedesktop/portal/desktop/request";
 const DONE: u32 = 0;
 const CANCELLED: u32 = 1;
 
+/// How long a dialog closed from this side waits for the portal to say it
+/// has closed (or that it was answered just before) before it is let go.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
+
 /// A print dialog that was confirmed: what the person chose, as the token
 /// the portal hands back, to be redeemed by [`Session::print`] once the PDF
 /// exists — on the connection it was handed back on.
@@ -101,7 +119,9 @@ impl std::fmt::Debug for Session {
 
 /// Put up the system's print dialog titled `title` and wait for the person
 /// to answer it. `Ok(None)` is the dialog cancelled. Blocks for as long as a
-/// person takes: never call this on the UI thread.
+/// person takes, or until `stop` is set: then the dialog is closed from this
+/// side and the answer is `None` too, unless the person confirmed it in the
+/// same instant (see the module header). Never call this on the UI thread.
 ///
 /// A `2` from the portal is `None` as well. The GTK backend answers `2` when
 /// the dialog is closed with Escape or its close button rather than Cancel,
@@ -109,13 +129,16 @@ impl std::fmt::Debug for Session {
 /// wrong every time. It is also the answer when the backend could not put the
 /// dialog up at all, which is rare enough that the debug log saying so is
 /// enough.
-pub fn prepare(title: &str) -> Result<Option<Session>, String> {
-    prepare_on(Bus::session_passing_fds()?, title)
+pub fn prepare(title: &str, stop: &AtomicBool) -> Result<Option<Session>, String> {
+    if stop.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    prepare_on(Bus::session_passing_fds()?, title, stop)
 }
 
 /// [`prepare`] over a connection already made: the session bus, or a test's
 /// make-believe one.
-fn prepare_on(mut bus: Bus, title: &str) -> Result<Option<Session>, String> {
+fn prepare_on(mut bus: Bus, title: &str, stop: &AtomicBool) -> Result<Option<Session>, String> {
     let handle_token = next_handle_token();
     let options = Value::Dict(vec![
         option("handle_token", "s", Value::Str(handle_token.clone())),
@@ -130,14 +153,19 @@ fn prepare_on(mut bus: Bus, title: &str) -> Result<Option<Session>, String> {
         Value::Dict(Vec::new()),
         options,
     ];
-    let answer = request(
+    let Some(answer) = request(
         &mut bus,
         &handle_token,
         "PreparePrint",
         "ssa{sv}a{sv}a{sv}",
         &args,
         &[],
-    )?;
+        Some(stop),
+    )?
+    else {
+        // Closed from this side.
+        return Ok(None);
+    };
     match answer.response {
         DONE => {
             let token = answer
@@ -189,14 +217,20 @@ impl Session {
             Value::UnixFd(0),
             options,
         ];
-        let answer = request(
+        // No stop: under a live token there is no dialog to close, and the
+        // portal answers at once.
+        let Some(answer) = request(
             &mut self.bus,
             &handle_token,
             "Print",
             "ssha{sv}",
             &args,
             &[pdf],
-        )?;
+            None,
+        )?
+        else {
+            return Err("printing was stopped".to_string());
+        };
         match answer.response {
             DONE => Ok(()),
             // Only when the token had expired and the dialog came back.
@@ -228,6 +262,12 @@ impl Answer {
 /// One portal request on `bus`, start to finish: `member` of the print
 /// interface with `args` (of signature `sig`) and `fds` beside them, made
 /// under `handle_token`, and the `Response` it came to.
+///
+/// `None` when `stop` was set before the `Response` came and the request was
+/// closed from this side ([`Bus::next_unless`], then `Request.Close`); with
+/// no `stop`, the wait is [`Bus::next`]'s and has no end but the four the
+/// module header names.
+#[allow(clippy::too_many_arguments)]
 fn request(
     bus: &mut Bus,
     handle_token: &str,
@@ -235,7 +275,8 @@ fn request(
     sig: &str,
     args: &[Value],
     fds: &[BorrowedFd<'_>],
-) -> Result<Answer, String> {
+    stop: Option<&AtomicBool>,
+) -> Result<Option<Answer>, String> {
     let sender = bus
         .unique_name()
         .ok_or_else(|| "the session bus did not name this connection".to_string())?;
@@ -248,12 +289,52 @@ fn request(
     let call = Message::method_call(PORTAL, PORTAL_PATH, PRINT, member).with_args(sig, args)?;
     let serial = bus.send_with_fds(call, fds)?;
     let mut paths = vec![path];
+    // Once the request has been closed from this side: the `Close` call's
+    // serial, and how long its answer is waited for.
+    let mut closing: Option<(u32, Instant)> = None;
     loop {
-        let msg = bus
-            .next()
-            .map_err(|e| format!("lost the session bus while printing: {e}"))?;
+        let next = match (closing, stop) {
+            (Some((_, until)), _) => bus.next_unless(|| Instant::now() >= until),
+            (None, Some(stop)) => bus.next_unless(|| stop.load(Ordering::SeqCst)),
+            (None, None) => bus.next().map(Some),
+        };
+        let msg = match next {
+            Ok(Some(msg)) => msg,
+            Ok(None) if closing.is_some() => {
+                log::debug!("the portal did not answer Close within {CLOSE_GRACE:?}");
+                return Ok(None);
+            }
+            Ok(None) => {
+                // The newest path the request is known by: where the portal
+                // said it put it, when it said somewhere else.
+                let at = paths.last().map_or("", String::as_str);
+                let close = Message::method_call(PORTAL, at, REQUEST, "Close");
+                match bus.send(close) {
+                    Ok(close_serial) => {
+                        closing = Some((close_serial, Instant::now() + CLOSE_GRACE));
+                        continue;
+                    }
+                    Err(e) => {
+                        log::debug!("closing the print dialog: {e}");
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(e) if closing.is_some() => {
+                log::debug!("closing the print dialog: {e}");
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("lost the session bus while printing: {e}")),
+        };
+        if let Some((close_serial, _)) = closing {
+            if closed(&msg, close_serial, &owner) {
+                return Ok(None);
+            }
+        }
         match heard(&msg, serial, &owner, &paths) {
-            Heard::Answer(answer) => return Ok(answer),
+            Heard::Answer(answer) => return Ok(Some(answer)),
+            // Whatever else ends a request ends one being closed quietly.
+            Heard::Refused(_) | Heard::PortalGone if closing.is_some() => return Ok(None),
             Heard::Refused(why) => return Err(why),
             Heard::PortalGone => {
                 return Err("the desktop portal went away while printing".to_string())
@@ -348,6 +429,25 @@ fn heard(msg: &Message, serial: u32, owner: &str, paths: &[String]) -> Heard {
             }
         }
         _ => Heard::Nothing,
+    }
+}
+
+/// Whether `msg` answers the `Request.Close` sent as `close_serial`: its
+/// return from the portal's `owner`, or an error from the portal or the bus —
+/// a request that had already ended, say — which ends the closing just the
+/// same.
+fn closed(msg: &Message, close_serial: u32, owner: &str) -> bool {
+    let from = msg.sender.as_deref();
+    if msg.reply_serial != Some(close_serial) {
+        return false;
+    }
+    match msg.kind {
+        MSG_METHOD_RETURN => from == Some(owner),
+        MSG_ERROR if from == Some(owner) || from == Some(BUS_DRIVER) => {
+            log::debug!("the portal answered Close with: {}", refusal(msg));
+            true
+        }
+        _ => false,
     }
 }
 
@@ -477,7 +577,7 @@ mod tests {
 
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
 
     use super::*;
     use crate::platform::linux::dbus::{parse_message, receive_with_fds};
@@ -711,12 +811,21 @@ mod tests {
         PortalLeaves,
         /// The bus hangs up instead.
         HangsUp,
+        /// The dialog stays up, unanswered, until it is closed; `Close` is
+        /// answered when this says so, and otherwise never.
+        StaysUp { answers_close: bool },
+        /// The person confirms in the instant the dialog is being closed:
+        /// the stop flag is set, and the `Response` with its token sent,
+        /// before the method has even returned.
+        ConfirmedAsClosed,
     }
 
-    /// What the make-believe bus saw of one request.
+    /// What the make-believe bus saw of one request, or of a `Close`.
     #[derive(Debug, Default)]
     struct Seen {
         member: String,
+        /// The object the call was made on.
+        at: String,
         args: Vec<Value>,
         /// The match rules in place when the call came.
         rules: Vec<String>,
@@ -729,15 +838,20 @@ mod tests {
 
     /// A bus on the far end of a socket pair: the bus driver for `AddMatch`,
     /// `NameHasOwner` and `GetNameOwner`, and the portal — at [`OWNER`] —
-    /// for `PreparePrint` and `Print`, answering each request as the next of
-    /// `script` says. What it saw of each request goes down the channel.
-    fn make_believe(script: Vec<Dialog>) -> (Bus, mpsc::Receiver<Seen>) {
+    /// for `PreparePrint`, `Print` and `Request.Close`, answering each request
+    /// as the next of `script` says. What it saw of each goes down the
+    /// channel; the flag is the `stop` to hand `prepare_on`, which the portal
+    /// sets itself for [`Dialog::ConfirmedAsClosed`].
+    fn make_believe(script: Vec<Dialog>) -> (Bus, mpsc::Receiver<Seen>, Arc<AtomicBool>) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let (seen_tx, seen) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let pull = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut sock = theirs;
             let mut rules = Vec::new();
             let mut script = script.into_iter();
+            let mut answers_close = true;
             let mut serial = 1000;
             let mut stamp = |mut msg: Message, sender: &str| {
                 serial += 1;
@@ -779,6 +893,7 @@ mod tests {
                         });
                         let _ = seen_tx.send(Seen {
                             member: member.to_string(),
+                            at: call.path.clone().unwrap_or_default(),
                             args,
                             rules: rules.clone(),
                             pdf,
@@ -813,7 +928,34 @@ mod tests {
                                 stamp(gone, BUS_DRIVER)
                             }
                             Dialog::HangsUp => return,
+                            Dialog::StaysUp {
+                                answers_close: answers,
+                            } => {
+                                answers_close = answers;
+                                stamp(handle, OWNER)
+                            }
+                            Dialog::ConfirmedAsClosed => {
+                                pull.store(true, Ordering::SeqCst);
+                                let answer = response(&path, DONE, chosen(TOKEN));
+                                if sock.write_all(&stamp(answer, OWNER)).is_err() {
+                                    return;
+                                }
+                                stamp(handle, OWNER)
+                            }
                         }
+                    }
+                    Some("Close") => {
+                        assert_eq!(call.interface.as_deref(), Some(REQUEST));
+                        let _ = seen_tx.send(Seen {
+                            member: "Close".to_string(),
+                            at: call.path.clone().unwrap_or_default(),
+                            rules: rules.clone(),
+                            ..Seen::default()
+                        });
+                        if !answers_close {
+                            continue;
+                        }
+                        stamp(reply, OWNER)
                     }
                     other => panic!("the make-believe bus was not taught {other:?}"),
                 };
@@ -824,7 +966,7 @@ mod tests {
                 }
             }
         });
-        (Bus::negotiated(ours, US), seen)
+        (Bus::negotiated(ours, US), seen, stop)
     }
 
     /// The handle token a request was made under, out of its options.
@@ -850,8 +992,8 @@ mod tests {
         let pdf = tree.join("report.pdf");
         std::fs::write(&pdf, "%PDF-1.7 make-believe").unwrap();
 
-        let (bus, seen) = make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(DONE)]);
-        let session = prepare_on(bus, "report.pdf").unwrap().unwrap();
+        let (bus, seen, stop) = make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(DONE)]);
+        let session = prepare_on(bus, "report.pdf", &stop).unwrap().unwrap();
         assert_eq!(session.token, TOKEN);
 
         let prepared = seen.recv().unwrap();
@@ -900,22 +1042,23 @@ mod tests {
     /// which with nobody in the loop is the backend failing.
     #[test]
     fn a_dialog_that_is_not_confirmed_prints_nothing() {
-        let (bus, _seen) = make_believe(vec![Dialog::Answers(CANCELLED)]);
-        assert!(prepare_on(bus, "a.pdf").unwrap().is_none());
+        let (bus, _seen, stop) = make_believe(vec![Dialog::Answers(CANCELLED)]);
+        assert!(prepare_on(bus, "a.pdf", &stop).unwrap().is_none());
 
-        let (bus, _seen) = make_believe(vec![Dialog::Answers(2)]);
-        assert!(prepare_on(bus, "a.pdf").unwrap().is_none());
+        let (bus, _seen, stop) = make_believe(vec![Dialog::Answers(2)]);
+        assert!(prepare_on(bus, "a.pdf", &stop).unwrap().is_none());
 
         let tree = df_core::test_support::TempTree::new("print-portal-again");
         let pdf = tree.join("a.pdf");
         std::fs::write(&pdf, "%PDF").unwrap();
-        let (bus, _seen) = make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(CANCELLED)]);
-        let session = prepare_on(bus, "a.pdf").unwrap().unwrap();
+        let (bus, _seen, stop) =
+            make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(CANCELLED)]);
+        let session = prepare_on(bus, "a.pdf", &stop).unwrap().unwrap();
         let err = session.print(&pdf).unwrap_err();
         assert!(err.contains("cancelled"), "{err}");
 
-        let (bus, _seen) = make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(2)]);
-        let session = prepare_on(bus, "a.pdf").unwrap().unwrap();
+        let (bus, _seen, stop) = make_believe(vec![Dialog::Answers(DONE), Dialog::Answers(2)]);
+        let session = prepare_on(bus, "a.pdf", &stop).unwrap().unwrap();
         let err = session.print(&pdf).unwrap_err();
         assert!(err.contains("without printing"), "{err}");
     }
@@ -924,25 +1067,94 @@ mod tests {
     /// lasting for ever.
     #[test]
     fn a_portal_or_a_bus_that_goes_ends_the_wait() {
-        let (bus, _seen) = make_believe(vec![Dialog::PortalLeaves]);
-        let err = prepare_on(bus, "a.pdf").unwrap_err();
+        let (bus, _seen, stop) = make_believe(vec![Dialog::PortalLeaves]);
+        let err = prepare_on(bus, "a.pdf", &stop).unwrap_err();
         assert!(err.contains("went away"), "{err}");
 
-        let (bus, _seen) = make_believe(vec![Dialog::HangsUp]);
-        let err = prepare_on(bus, "a.pdf").unwrap_err();
+        let (bus, _seen, stop) = make_believe(vec![Dialog::HangsUp]);
+        let err = prepare_on(bus, "a.pdf", &stop).unwrap_err();
         assert!(err.contains("lost the session bus"), "{err}");
     }
 
     /// A PDF that cannot be opened is an error before anything is sent.
     #[test]
     fn a_missing_pdf_is_not_sent() {
-        let (bus, seen) = make_believe(vec![Dialog::Answers(DONE)]);
-        let session = prepare_on(bus, "gone.pdf").unwrap().unwrap();
+        let (bus, seen, stop) = make_believe(vec![Dialog::Answers(DONE)]);
+        let session = prepare_on(bus, "gone.pdf", &stop).unwrap().unwrap();
         let _ = seen.recv().unwrap();
         let err = session
             .print(Path::new("/nonexistent/delightfile/gone.pdf"))
             .unwrap_err();
         assert!(err.contains("cannot open"), "{err}");
         assert!(seen.try_recv().is_err(), "no Print was made");
+    }
+
+    /// Stopped while the dialog is up, `prepare` closes it — `Request.Close`
+    /// on the request's own path, on its own connection — and is `None` as
+    /// soon as the portal says it has, without waiting out the grace.
+    #[test]
+    fn a_stop_while_the_dialog_is_up_closes_it() {
+        let (bus, seen, stop) = make_believe(vec![Dialog::StaysUp {
+            answers_close: true,
+        }]);
+        let start = Instant::now();
+        let got = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(150));
+                stop.store(true, Ordering::SeqCst);
+            });
+            prepare_on(bus, "a.pdf", &stop)
+        });
+        assert!(got.unwrap().is_none(), "closed is no answer");
+        assert!(
+            start.elapsed() < Duration::from_millis(150) + CLOSE_GRACE,
+            "the Close's answer ended it, not the grace: {:?}",
+            start.elapsed()
+        );
+        let prepared = seen.recv().unwrap();
+        assert_eq!(prepared.member, "PreparePrint");
+        let close = seen.recv().unwrap();
+        assert_eq!(close.member, "Close");
+        assert_eq!(
+            close.at,
+            request_path(US, &handle_token(&prepared)).unwrap(),
+            "the request that was put up is the one closed"
+        );
+    }
+
+    /// A portal that never answers the `Close` is let go after the grace.
+    #[test]
+    fn a_close_nobody_answers_is_given_up_on() {
+        let (bus, seen, stop) = make_believe(vec![Dialog::StaysUp {
+            answers_close: false,
+        }]);
+        let start = Instant::now();
+        let got = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::SeqCst);
+            });
+            prepare_on(bus, "a.pdf", &stop)
+        });
+        assert!(got.unwrap().is_none());
+        let took = start.elapsed();
+        assert!(
+            took >= CLOSE_GRACE && took < CLOSE_GRACE + Duration::from_secs(2),
+            "the grace and no longer: {took:?}"
+        );
+        assert_eq!(seen.recv().unwrap().member, "PreparePrint");
+        assert_eq!(seen.recv().unwrap().member, "Close");
+    }
+
+    /// A dialog confirmed in the instant it is being closed is confirmed:
+    /// the `Response` wins over the stop, and the caller has its token.
+    #[test]
+    fn a_response_in_the_same_instant_as_a_stop_wins() {
+        let (bus, _seen, stop) = make_believe(vec![Dialog::ConfirmedAsClosed]);
+        let session = prepare_on(bus, "a.pdf", &stop)
+            .unwrap()
+            .expect("the confirmation still counts");
+        assert!(stop.load(Ordering::SeqCst), "the stop was set first");
+        assert_eq!(session.token, TOKEN);
     }
 }
