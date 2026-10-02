@@ -417,6 +417,20 @@ struct PendingRemote {
     slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>>,
 }
 
+/// A print run ([`App::print_paths`]): files sent through the desktop's print
+/// dialog one at a time, since the dialog is one file's.
+///
+/// Each file is a job of its own whose result comes back through a
+/// [`PendingRemote`], as a font's install does, so the toast and the tasks
+/// panel both say what it came to; the run goes on when that job is over,
+/// and stops when it ended cancelled — the dialog was, or the task.
+struct PrintRun {
+    /// The job printing the file now.
+    id: TaskId,
+    /// The files after it, in the order they were asked for.
+    rest: std::collections::VecDeque<PathBuf>,
+}
+
 /// What a finished remote operation owes the UI.
 ///
 /// One flat shape rather than a variant per verb, because every remote
@@ -1239,6 +1253,66 @@ fn plural_verb(n: usize) -> &'static str {
     }
 }
 
+/// What printing says where the platform has no print dialog to put up
+/// ([`crate::platform::print::SUPPORTED`]).
+const PRINT_UNSUPPORTED: &str = "Printing is not available on this platform";
+
+/// What printing says inside an archive, whose rows are no file a PDF can be
+/// made of until they are out of it.
+const PRINT_IN_ARCHIVE: &str = "Extract it first";
+
+/// Where a print job's file is.
+enum PrintSource {
+    /// On this machine.
+    Local(PathBuf),
+    /// On a remote service, to be downloaded first.
+    Remote(df_core::vfs::VfsPath, Arc<df_core::vfs::Vfs>),
+}
+
+/// One file of a print run, on its job: through the dialog
+/// ([`crate::print::print_one`]), downloaded first when it is remote — into
+/// a folder of its own under the print scratch folder, under the name it has
+/// on the server, so the dialog, the PDF and any error are named as it is —
+/// and the download removed once it has printed.
+fn print_file(source: PrintSource, ctx: &TaskCtx) -> crate::print::Printed {
+    use crate::print::Printed;
+    let scratch = crate::print::scratch();
+    let (file, fetched) = match source {
+        PrintSource::Local(file) => (file, None),
+        PrintSource::Remote(at, vfs) => {
+            let dir = match crate::print::fresh_dir(&scratch) {
+                Ok(dir) => dir,
+                Err(e) => return Printed::Failed(e),
+            };
+            let file = dir.join(df_core::path::made_valid(at.name()).as_ref());
+            // A failed or cancelled download removes what it had written.
+            if let Err(e) = vfs.download(&at, &file, ctx) {
+                let _ = std::fs::remove_dir(&dir);
+                return if ctx.is_cancelled() {
+                    Printed::Stopped
+                } else {
+                    Printed::Failed(e.to_string())
+                };
+            }
+            (file, Some(dir))
+        }
+    };
+    let printed = crate::print::print_one(
+        &file,
+        &scratch,
+        ctx,
+        crate::platform::print::prepare,
+        crate::platform::print::Session::print,
+    );
+    if let Some(dir) = fetched {
+        if let Err(e) = std::fs::remove_file(&file) {
+            log::debug!("{}: {e}", file.display());
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+    printed
+}
+
 /// How a session ended, and therefore what gets written on the way out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quit {
@@ -1714,6 +1788,9 @@ pub struct App {
     /// Remote operations running on the pool, and what each owes the UI when it
     /// lands. Plural because a download and a rename can be in flight at once.
     remote_ops: Vec<PendingRemote>,
+    /// The print run going on, if one is: the file whose turn it is, and the
+    /// files waiting behind it ([`App::print_paths`]).
+    printing: Option<PrintRun>,
     /// The preview card's state for the remote row under the cursor.
     remote_preview: Option<RemotePreview>,
     /// The row the cursor is resting on and since when — the preview's debounce
@@ -2429,6 +2506,7 @@ impl App {
             vfs: None,
             temps: crate::remote::Temps::default(),
             remote_ops: Vec::new(),
+            printing: None,
             remote_preview: None,
             remote_hover: None,
             remote_connected: HashSet::new(),
@@ -3062,6 +3140,20 @@ impl App {
                 // cancelled before it ran is not waited on for ever.
                 self.poll_connects(now);
                 self.forget_connect(event.id);
+                // A print run's file is over: the next one's turn, or the
+                // run's end. After the slot was read, so what this file came
+                // to is said before the next dialog goes up.
+                self.print_turn_over(event.id, event.state == TaskState::Cancelled, now);
+            }
+            // One file of a print run failed — said by its slot, read here so
+            // it is said now — and the run goes on to the next, once the
+            // engine says the failure is final.
+            TaskState::Failed { .. }
+                if self.printing.as_ref().is_some_and(|run| run.id == event.id)
+                    && self.engine.task(event.id).is_some_and(|task| task.terminal) =>
+            {
+                self.poll_remote_ops(now);
+                self.print_turn_over(event.id, false, now);
             }
             // A failure is not always the end — a transient one is republished
             // as `Failed { retries }` and then runs again — so the op stays
@@ -5156,6 +5248,159 @@ impl App {
         }
     }
 
+    /// `builtin:print` over `paths`, and `Command::Print` over the targets:
+    /// each file through the desktop's print dialog as a PDF
+    /// ([`crate::print`]), one at a time, since the dialog is one file's — a
+    /// run going already takes these on after its own.
+    ///
+    /// Turned away where it cannot happen: a platform with no dialog, and an
+    /// archive's rows, which are no file to print until they are extracted
+    /// ([`App::refusal`] says the same before the command gets here). A
+    /// folder has nothing to print: alone it is refused, and among files it
+    /// is left out, with one notice saying how many were. A remote file is
+    /// downloaded on the job first.
+    fn print_paths(&mut self, paths: Vec<PathBuf>, now: Instant) {
+        if !crate::platform::print::SUPPORTED {
+            self.toasts.notice(PRINT_UNSUPPORTED, now);
+            return;
+        }
+        if self.tab().archive.is_some() {
+            self.toasts.notice(PRINT_IN_ARCHIVE, now);
+            return;
+        }
+        // Which are folders: their rows say, found in one pass over the
+        // listing, and the disk for a path with no row on screen.
+        let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let rows: HashMap<&Path, bool> = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .filter(|entry| wanted.contains(entry.path.as_path()))
+            .map(|entry| (entry.path.as_path(), entry.is_dir()))
+            .collect();
+        let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
+            paths
+                .into_iter()
+                .partition(|path| match rows.get(path.as_path()) {
+                    Some(is_dir) => *is_dir,
+                    None => crate::remote::at_of(path).is_none() && path.is_dir(),
+                });
+        match (folders.as_slice(), files.is_empty()) {
+            ([], true) => {
+                self.toasts.notice("Nothing to print", now);
+                return;
+            }
+            ([folder], true) => {
+                self.toasts.notice(
+                    format!("{} is a folder — only files print", file_name(folder)),
+                    now,
+                );
+                return;
+            }
+            (folders, true) => {
+                self.toasts.notice(
+                    format!(
+                        "{} — only files print",
+                        plural(folders.len(), "folder", "folders")
+                    ),
+                    now,
+                );
+                return;
+            }
+            ([], false) => {}
+            (folders, false) => self.toasts.notice(
+                format!(
+                    "Skipped {} — only files print",
+                    plural(folders.len(), "folder", "folders")
+                ),
+                now,
+            ),
+        }
+        if let Some(run) = &mut self.printing {
+            run.rest.extend(files);
+            return;
+        }
+        let mut rest: std::collections::VecDeque<PathBuf> = files.into();
+        if let Some(first) = rest.pop_front() {
+            let id = self.spawn_print(first);
+            self.printing = Some(PrintRun { id, rest });
+        }
+    }
+
+    /// One file's turn in the print run: a job that downloads it first when
+    /// it is remote, then puts the dialog up and makes the PDF meanwhile
+    /// ([`print_file`]). Its slot says "Sent … to the printer" or what went
+    /// wrong; cancelled, it says nothing and the run stops
+    /// ([`App::print_turn_over`]).
+    fn spawn_print(&mut self, path: PathBuf) -> TaskId {
+        let (name, source) = match crate::remote::at_of(&path) {
+            None => (file_name(&path), PrintSource::Local(path)),
+            Some(at) => (at.name().to_string(), PrintSource::Remote(at, self.vfs())),
+        };
+        let slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let job_slot = Arc::clone(&slot);
+        let mut work = Some((source, name.clone()));
+        let job = FnJob::new(format!("Print {name}"), Lane::Micro, move |ctx| {
+            // Taken once: a print is not something to do twice on a retry.
+            let Some((source, name)) = work.take() else {
+                return Ok(());
+            };
+            let (result, ended) = match print_file(source, ctx) {
+                crate::print::Printed::Sent => (
+                    Ok(RemoteDone {
+                        message: format!("Sent {name} to the printer"),
+                        ..RemoteDone::default()
+                    }),
+                    Ok(()),
+                ),
+                // The run's own toast says it stopped; the slot says nothing.
+                crate::print::Printed::Stopped => (
+                    Err(df_core::DfError::Cancelled.to_string()),
+                    Err(df_core::DfError::Cancelled),
+                ),
+                // The tasks panel says why too, after the toast has gone.
+                crate::print::Printed::Failed(message) => {
+                    (Err(message.clone()), Err(df_core::DfError::Op(message)))
+                }
+            };
+            match job_slot.lock() {
+                Ok(mut guard) => *guard = Some(result),
+                Err(poisoned) => *poisoned.into_inner() = Some(result),
+            }
+            ended
+        });
+        let id = self.engine.spawn(job);
+        self.remote_ops.push(PendingRemote { id, slot });
+        id
+    }
+
+    /// The print run's file `id` is over: the next file's turn, or the end
+    /// of the run — and when it ended `cancelled`, the end whatever was left,
+    /// said once.
+    fn print_turn_over(&mut self, id: TaskId, cancelled: bool, now: Instant) {
+        if self.printing.as_ref().is_none_or(|run| run.id != id) {
+            return;
+        }
+        if cancelled {
+            self.printing = None;
+            self.toasts.notice("Printing stopped", now);
+            return;
+        }
+        let next = self.printing.as_mut().and_then(|run| run.rest.pop_front());
+        match next {
+            Some(path) => {
+                let id = self.spawn_print(path);
+                if let Some(run) = &mut self.printing {
+                    run.id = id;
+                }
+            }
+            None => self.printing = None,
+        }
+    }
+
     /// The confirm was answered yes — or, for a local trash, was never put
     /// up at all (see [`App::trash`]).
     fn run_confirm(&mut self, confirm: Confirm, now: Instant) {
@@ -6184,6 +6429,12 @@ impl App {
                         now,
                     );
                 }
+                return;
+            }
+            // The desktop's print dialog, a file at a time — the door the
+            // `print` command goes through too, gates and all.
+            if builtin == open::PRINT_BUILTIN {
+                self.print_paths(paths, now);
                 return;
             }
             // The shipped built-ins are the three extracts (PLAN §6's "fix the
@@ -7436,6 +7687,16 @@ impl App {
                 detail: String::new(),
                 kind: finder::Kind::Command,
                 choice: Choice::Run(Command::UndoHistory),
+            });
+        }
+        // Printing, which has no key by default either — and no row at all
+        // where the platform has no print dialog to put up.
+        if crate::platform::print::SUPPORTED && !seen.contains(&Command::Print.id()) {
+            rows.push(finder::Row {
+                label: "Print…".to_string(),
+                detail: String::new(),
+                kind: finder::Kind::Command,
+                choice: Choice::Run(Command::Print),
             });
         }
         // The view toggle, which has no registry row to be found under — see
@@ -10524,6 +10785,17 @@ impl App {
         if command == Command::Tag && !df_core::fs::tags::read_here(self.tab().cwd.path()) {
             return Some("Tags are read on local drives only");
         }
+        // Printing puts up the desktop's print dialog, which only some
+        // platforms have behind `platform::print` yet…
+        if command == Command::Print && !crate::platform::print::SUPPORTED {
+            return Some(PRINT_UNSUPPORTED);
+        }
+        // …and makes a PDF of a file on a disk, which an archive's rows are
+        // not until they are out of it. A remote file is downloaded first,
+        // as `o` downloads one.
+        if command == Command::Print && self.tab().archive.is_some() {
+            return Some(PRINT_IN_ARCHIVE);
+        }
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
@@ -11198,6 +11470,10 @@ impl App {
             C::ArchiveCreate => self.open_archive_prompt(now),
             C::Permissions => self.open_permissions(now),
             C::OpenInteractive => self.open_picker(now),
+            // What the `print` opener does from `O`, over the selection or
+            // the row under the cursor; the gate above has turned away the
+            // places it cannot.
+            C::Print => self.print_paths(self.targets(), now),
             // The primary button, from the keyboard: exactly what a click on
             // it does, dimmed-and-silent included. Outside a picker there is
             // no button, and `press_pick` does nothing without one.
@@ -21116,6 +21392,9 @@ impl App {
             let swept = self.temps.clear();
             log::info!("removed {swept} of {held} temporary remote file(s)");
         }
+        // The folder printing made its PDFs in, each of which went once it
+        // was printed: `remove_dir`, so one a print still running holds stays.
+        let _ = std::fs::remove_dir(crate::print::scratch());
         // Stop the workers before the window goes: a scan that finished into a
         // dropped channel is harmless, but joining them here keeps the shutdown
         // order the same every time.
@@ -21205,6 +21484,9 @@ mod tests {
 
     /// The trash's weight and its clock.
     mod trash;
+
+    /// Printing: the gates, the folders left out, the rows, and the run.
+    mod printing;
 
     /// `T`: the prompt, the difference a selection gets, `Tab`, `u`, the
     /// dots and the `m t` column.

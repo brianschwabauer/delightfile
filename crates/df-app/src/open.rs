@@ -81,6 +81,12 @@ pub const SHELL_OPEN_WITH_BUILTIN: &str = "shell-open-with";
 /// does (`plans/other-platforms/04-windows.md` W4.43).
 pub const FONT_INSTALL_BUILTIN: &str = "font-install";
 
+/// The builtin that prints (`builtin:print`): each file through the
+/// desktop's own print dialog, as a PDF ([`crate::print`]). Only Linux's
+/// table names it, while only Linux has a dialog behind it
+/// ([`crate::platform::print::SUPPORTED`]).
+pub const PRINT_BUILTIN: &str = "print";
+
 /// What `builtin:font-install` came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontInstall {
@@ -774,7 +780,7 @@ mod tests {
             let choices = choices_for(&config, &file(name));
             let last = choices.last().expect(name);
             assert_eq!(last.name, "print", "{name}");
-            assert_eq!(last.builtin(), Some("print"), "{name}");
+            assert_eq!(last.builtin(), Some(PRINT_BUILTIN), "{name}");
             assert_eq!(last.description, "Print…", "{name}");
             assert!(!last.block, "{name}");
         }
@@ -786,7 +792,7 @@ mod tests {
         assert!(
             choices
                 .iter()
-                .all(|choice| choice.builtin() != Some("print")),
+                .all(|choice| choice.builtin() != Some(PRINT_BUILTIN)),
             "{choices:?}"
         );
     }

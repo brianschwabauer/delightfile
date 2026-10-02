@@ -692,6 +692,10 @@ pub fn app_items(
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
         run("Compress…", C::ArchiveCreate, acts),
+        // The `print` opener's door for the selection, unbound by default;
+        // grey where the gate would refuse it — an archive, a platform with
+        // no print dialog.
+        run("Print…", C::Print, acts),
     ];
     // Every parent is always live: a parent row only opens a list, and a
     // grey one would hide the rows under it that *can* act.
@@ -1826,6 +1830,33 @@ mod tests {
         }
     }
 
+    /// A PDF row's "Open with" is the opener rules' list for it, so it ends
+    /// in printing: the `print` opener, which the `O` picker calls "Print…".
+    /// Linux's rules; a Mac's and Windows' name no `print` while their
+    /// platform has no print dialog behind it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_pdf_rows_open_with_ends_in_print() {
+        let config = df_core::config::Config::default();
+        let openers: Vec<String> = config
+            .openers_for("paper.pdf", "application/pdf", false)
+            .into_iter()
+            .map(|opener| opener.name.clone())
+            .collect();
+        let rows = items(facts(), &openers);
+        let open_with = rows
+            .iter()
+            .find(|item| item.label == "Open with")
+            .and_then(|item| item.submenu.as_deref())
+            .expect("Open with flies the openers out");
+        let last = open_with.last().expect("a row");
+        assert_eq!(last.label, crate::open::PRINT_BUILTIN);
+        assert_eq!(last.action, Action::OpenWith(openers.len() - 1));
+        let print = config.opener(&last.label).expect("the opener");
+        assert_eq!(print.description, "Print…");
+        assert_eq!(print.builtin(), Some(crate::open::PRINT_BUILTIN));
+    }
+
     /// The context menu, row for row, as it was before the app menu shared its
     /// model: the same labels, keys, verbs, gaps and enablement, no ticks, and
     /// "Open with" flying out the opener rules by name with no keys of their
@@ -2827,6 +2858,7 @@ mod tests {
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
                 ("Compress…", "A", false),
+                ("Print…", "", false),
             ]
         );
         // Every leaf is the command its key runs, so it cannot drift from it.
@@ -2849,6 +2881,7 @@ mod tests {
         assert_eq!(command("New file or folder…"), C::Create);
         assert_eq!(command("Permissions…"), C::Permissions);
         assert_eq!(command("Tags…"), C::Tag);
+        assert_eq!(command("Print…"), C::Print);
         assert_eq!(command("Trash"), C::OpenTrash);
         assert_eq!(command("Clipboard"), C::YankShow);
         assert_eq!(command("Keyboard shortcuts"), C::Help);

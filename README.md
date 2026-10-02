@@ -423,6 +423,17 @@ delightfile's own edits), the same `[1, 4, 3]` column ratio, catppuccin-mocha, a
 nineteen custom directory icons. The one thing yazi never had is a light side, and that
 follows the desktop.
 
+Printing is one of those openers, `print`, last in `O` for PDFs, pictures, office
+documents (Word, PowerPoint, Excel, OpenDocument, RTF), text, markdown and code. Each file
+gets the desktop's own print dialog, one at a time. A PDF goes to the printer as it is. A
+JPEG, PNG, WebP or GIF goes on a one-page PDF that delightfile writes itself: US Letter in
+a US locale, A4 anywhere else, on its side for a wide picture. Everything else goes
+through LibreOffice (`soffice --headless --convert-to pdf`) when it is installed; without
+it those files say so and nothing else changes. The `print` command does the same for the
+selection from the palette or the app menu's Edit ▸ Print…. It has no key by default, and
+a `keymap.toml` line such as `"ctrl+shift+p" = "print"` under `[files]` gives it one.
+Linux only for now.
+
 `theme.toml` picks the flavour for each side and overrides single colours, on both sides
 or on one:
 
